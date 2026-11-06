@@ -257,10 +257,11 @@ class KVConnectorFactory:
         * `multi` is whatever it wraps. Each entry of `connectors` is a full
           transfer config, and `MultiConnector.register_kv_caches` forwards the
           same tensors to every sub, so one region reader settles it.
-        * `lmcache_offload` picks a codec from the MODEL, not the config, and
-          only the dense one ignores the regions -- hybrid, m3 and kimi_k3
-          source their PAGE bytes from them. That is not knowable at
-          registration, so the layout is asked here.
+        * `lmcache_offload` and `mooncake_store` pick a codec from the MODEL,
+          not the config, and only the dense one ignores the regions.
+          `lmcache_offload`'s hybrid, m3 and kimi_k3 layouts source their PAGE
+          bytes from them; `mooncake_store` does so for m3. That is not
+          knowable at registration, so the layout is asked here.
         """
 
         leaves = cls.leaf_connectors(config)
@@ -295,7 +296,10 @@ class KVConnectorFactory:
     def _leaf_reads_block_regions(cls, connector: str, config: Any) -> bool:
         if cls._reads_block_regions.get(connector, True):
             return True
-        if connector == "lmcache_offload":
+        # Both register `reads_block_regions=False` because their dense codec
+        # builds from `KVCacheTensor`s. A non-dense layout of either one packs
+        # PAGE bytes from the region map, which registration cannot see.
+        if connector in ("lmcache_offload", "mooncake_store"):
             from atom.kv_transfer.offload.config import select_offload_layout
 
             return select_offload_layout(config) != "dense"

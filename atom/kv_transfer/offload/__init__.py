@@ -18,7 +18,9 @@ Registers three backends with the shared KV connector factory:
 * ``mooncake_store`` -- a Mooncake Store reached directly, no LMCache involved:
   start its master and owners and set ``ATOM_KV_OFFLOAD=mooncake_store`` with
   ``ATOM_KV_OFFLOAD_EXTRA_CONFIG`` naming them (``mooncake_store.master`` and
-  ``mooncake_store.metadata``, or ``mooncake_store.pools``). Dense layout only.
+  ``mooncake_store.metadata``, or ``mooncake_store.pools``). Dense and
+  MiniMax-M3/M3.1 PAGE layouts; stateful layouts and DCP greater than 1 stay
+  refused.
 """
 
 from atom.kv_transfer.disaggregation.factory import KVConnectorFactory
@@ -60,6 +62,8 @@ KVConnectorFactory.register(
     scheduler_class="MooncakeStoreOffloadScheduler",
     requires_pd_staging=False,
     offload=True,
-    # The dense codec builds from `KVCacheTensor`s; the region map is unread.
+    # The dense codec builds from `KVCacheTensor`s and ignores the region map.
+    # The m3 layout reads it, and which one applies comes from the model, so
+    # `topology_reads_block_regions` refines this by layout.
     reads_block_regions=False,
 )

@@ -45,10 +45,6 @@ _MEDIA_SEED_PERSON = b"atom-kv-media-v1"
 _NAMESPACE_PREFIX = "atomkv1-"
 # Bumped when the dense codec's per-chunk byte layout changes.
 CODEC_ID = "dense-opaque-block-v1"
-# M3 packs each block's regions in publication order (pool -> field -> layer,
-# then draft merge_pages). Bump when the M3 region order or set changes, even
-# if the total byte count stays the same: existing Store objects outlive servers.
-M3_CODEC_ID = "m3-complete-page-v1"
 
 
 def pp_stage_layer_spans(config: Any) -> list[tuple[int, int]]:
@@ -121,6 +117,19 @@ def kv_storage_formats(config: Any) -> dict[str, str]:
     }
 
 
+def _codec_id(config: Any) -> str:
+    """The codec version folded into this server's Store namespace.
+
+    M3's id lives with the codec that defines its region order. It is imported
+    only for that layout, so a dense server does not load the M3 connector.
+    """
+    if offcfg.select_offload_layout(config) == "m3":
+        from atom.kv_transfer.offload.hybrid.m3.codec import M3_CODEC_ID
+
+        return M3_CODEC_ID
+    return CODEC_ID
+
+
 def store_namespace(config: Any, chunk_tokens: int) -> str:
     """The key prefix every chunk of this server's KV layout is stored under.
 
@@ -157,9 +166,7 @@ def store_namespace(config: Any, chunk_tokens: int) -> str:
             getattr(config, "hf_overrides", None), sort_keys=True, default=str
         ),
         "revision": str(getattr(hf, "_commit_hash", None)),
-        "codec": (
-            M3_CODEC_ID if offcfg.select_offload_layout(config) == "m3" else CODEC_ID
-        ),
+        "codec": _codec_id(config),
     }
     canonical = json.dumps(
         document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
