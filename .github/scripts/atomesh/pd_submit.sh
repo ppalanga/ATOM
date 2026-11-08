@@ -255,6 +255,7 @@ exports = {
     "SWEBENCH_MAX_WORKERS": "" if accuracy.get("max_workers") is None else accuracy.get("max_workers"),
     "SWEBENCH_EVAL_TIMEOUT": "" if accuracy.get("instance_timeout") is None else accuracy.get("instance_timeout"),
     "SLURM_SUBMIT_RUNNER": slurm_submit_runner,
+    "SLURM_EXCLUDE_NODES": csv_value(runner.get("exclude_nodes", "")),
     "SLURM_ACCOUNT": "amd-aifw-dev" if is_crusoe_v2 else runner.get("slurm_account", "amd-atom"),
     "SLURM_PARTITION": "" if is_crusoe_v2 else runner.get("slurm_partition", "amd-spur"),
     "SLURM_QOS": "amd-aifw-dev-qos" if is_crusoe_v2 else runner.get("slurm_qos", ""),
@@ -321,6 +322,7 @@ echo "cell=${ATOMESH_CELL_ID}"
 echo "model=${MODEL_NAME}"
 echo "topology=${DISPLAY_TOPOLOGY}"
 echo "nodes=${NODE_LIST}"
+echo "exclude_nodes=${SLURM_EXCLUDE_NODES}"
 echo "slurm_account=${SLURM_ACCOUNT:-default}"
 echo "slurm_partition=${SLURM_PARTITION:-default}"
 echo "slurm_qos=${SLURM_QOS:-default}"
@@ -419,6 +421,9 @@ EOF
   if [[ -n "${nodes}" ]]; then
     printf '#SBATCH -w %s\n' "${nodes}" >> "${SUBMIT_SCRIPT}"
   fi
+  if [[ -n "${SLURM_EXCLUDE_NODES}" ]]; then
+    printf '#SBATCH --exclude=%s\n' "${SLURM_EXCLUDE_NODES}" >> "${SUBMIT_SCRIPT}"
+  fi
   cat >> "${SUBMIT_SCRIPT}" <<EOF
 #SBATCH --output=${SLURM_OUTPUT}
 #SBATCH --error=${SLURM_ERROR}
@@ -465,16 +470,37 @@ else
     --gres "gpu:${SLURM_GPUS_PER_NODE}"
     --time "${SLURM_TIME_LIMIT}"
   )
+  SLURM_NODE_SELECTION_ARGS=()
   if [[ -n "${NODE_LIST}" ]]; then
     slurm_node_selection_args "${NODE_LIST}" "${NUM_NODES}"
-    SBATCH_CMD+=("${SLURM_NODE_SELECTION_ARGS[@]}")
   fi
+  if [[ -n "${SLURM_EXCLUDE_NODES}" ]]; then
+    if [[ "${SLURM_NODE_SELECTION_ARGS[0]:-}" == "--exclude" ]]; then
+      SLURM_NODE_SELECTION_ARGS[1]+=",${SLURM_EXCLUDE_NODES}"
+    else
+      SLURM_NODE_SELECTION_ARGS+=(--exclude "${SLURM_EXCLUDE_NODES}")
+    fi
+  fi
+  SBATCH_CMD+=("${SLURM_NODE_SELECTION_ARGS[@]}")
   SBATCH_CMD+=(
     --output "${SLURM_OUTPUT}"
     --error "${SLURM_ERROR}"
     "${JOB_SCRIPT}"
   )
 fi
+
+# Adds comma-separated hosts to the sbatch command's --exclude list, or gives
+# it one ahead of the job script.
+sbatch_exclude_hosts() {
+  local hosts="$1" i
+  for i in "${!SBATCH_CMD[@]}"; do
+    if [[ "${SBATCH_CMD[i]}" == "--exclude" ]]; then
+      SBATCH_CMD[i + 1]+=",${hosts}"
+      return 0
+    fi
+  done
+  SBATCH_CMD=("${SBATCH_CMD[@]:0:${#SBATCH_CMD[@]}-1}" --exclude "${hosts}" "${SBATCH_CMD[-1]}")
+}
 
 submit_and_monitor_slurm_job() {
   echo "=== submitting Slurm job ==="
@@ -517,18 +543,24 @@ submit_and_monitor_slurm_job() {
 
 # Spur ignores --exclusive and may place the job on a node whose GPUs another
 # job holds. The batch script then records the busy hosts in gpu-busy/ before
-# starting any worker; resubmit without them, or wait for the pool to drain
-# when too few candidates remain.
+# starting any worker, as a strict host cache drop records in unfit-hosts/ a
+# host that denies its privileged helper; resubmit without them: among
+# NODE_LIST on mi350, which waits for the pool to drain when too few candidates
+# remain, and by excluding them where the scheduler picks the nodes.
 GPU_BUSY_RETRIES="${ATOMESH_GPU_BUSY_RETRIES:-6}"
 GPU_BUSY_WAIT_SECONDS="${ATOMESH_GPU_BUSY_WAIT_SECONDS:-300}"
 gpu_busy_attempt=0
 declare -A gpu_busy_nodes=()
 while true; do
   submit_and_monitor_slurm_job
-  [[ "${SLURM_SUBMIT_RUNNER}" == "atomesh-cicd-mi350" && -n "${NODE_LIST}" ]] || break
-  busy_dir="${LOG_ROOT}/slurm_job-${JOB_ID}/gpu-busy"
+  if [[ "${SLURM_SUBMIT_RUNNER}" == "atomesh-cicd-mi350" ]]; then
+    [[ -n "${NODE_LIST}" ]] || break
+  else
+    [[ -z "${NODE_LIST}" ]] || break
+  fi
+  job_run_dir="${LOG_ROOT}/slurm_job-${JOB_ID}"
   shopt -s nullglob
-  busy_markers=("${busy_dir}"/*)
+  busy_markers=("${job_run_dir}"/gpu-busy/* "${job_run_dir}"/unfit-hosts/*)
   shopt -u nullglob
   [[ "${#busy_markers[@]}" -gt 0 ]] || break
   if (( gpu_busy_attempt >= GPU_BUSY_RETRIES )); then
@@ -536,6 +568,12 @@ while true; do
     break
   fi
   gpu_busy_attempt=$((gpu_busy_attempt + 1))
+  if [[ "${SLURM_SUBMIT_RUNNER}" != "atomesh-cicd-mi350" ]]; then
+    busy_hosts="$(for marker in "${busy_markers[@]}"; do basename "${marker}"; done | paste -sd, -)"
+    echo "=== GPUs busy on ${busy_hosts}; resubmitting (${gpu_busy_attempt}/${GPU_BUSY_RETRIES}) without them ==="
+    sbatch_exclude_hosts "${busy_hosts}"
+    continue
+  fi
   for marker in "${busy_markers[@]}"; do
     gpu_busy_nodes["$(basename "${marker}")"]=1
   done
