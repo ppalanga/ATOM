@@ -2617,3 +2617,187 @@ models:
               PREFILL_KV_TRANSFER_CONFIG: >-
                 {"kv_connector":"mooncake","kv_role":"kv_producer","proxy_ip":"${ROLE_IP}","handshake_port":${HANDSHAKE_PORT},"protocol":"rdma","enable_chunked_transfer":true}
             decode: *m31_flash_pp4_direct_decode_env
+
+  # MiniMax-M3.1-Flash on the InferenceX AgentX trace (1M context, 3600 s):
+  # the best 1P2D cell per concurrency. One CPP4 prefill (TP1 x PP4) and two
+  # TP4 decodes packed on two MI355X nodes, 12 GPUs.
+  MiniMax-M3.1-Flash-AgentX-1P2D:
+    backend: atom
+    image: rocm/atom-dev:m31-mxfp4-stack-20261031
+    model_path: ${ATOMESH_MODEL_ROOT}/.huggingface/hub/models--amd--MiniMax-M3.1-Flash-Quark-MXFP4/snapshots/0a00e0e39fc00499b23efccc18a8ea63fce5c44c
+    precision: MXFP4
+    env:
+      common:
+        ATOMESH_M31_AITER_REF: ''
+        AITER_LOG_LEVEL: WARNING
+        ATOM_M3_SPARSE_KV_MXFP4: '1'
+        ATOM_M3_SPARSE_KV_NVFP4: '0'
+        ATOM_M3_INDEX_Q_FP8: '1'
+        ATOM_M3_FUSED_VERIFY_TOPK: '0'
+        ATOM_M3_DSPARK_DRAFT_PTPC: '0'
+        ATOM_MONO_ENABLE: '0'
+        ATOM_M3_INDEXER_CP: '0'
+        ATOM_DSPARK_DRAFT_KV_WINDOW: '0'
+        # P gathers PAGEs into staging slots; D lands them and scatters.
+        ATOM_PD_MHA_LANDING: '1'
+        ATOM_FUSE_MXFP8_SHARED_INTO_MXFP4: '1'
+        ATOM_TOKENIZE_CACHE_MB: '2048'
+        MC_DISABLE_HIP: '1'
+        MC_NUM_QP_PER_EP: '1'
+        HF_HUB_CACHE: /tmp/m31-agentx-hf-hub
+        HF_HUB_DOWNLOAD_TIMEOUT: '120'
+        PYTHONNOUSERSITE: '1'
+        PYTHONHASHSEED: '0'
+        ATOMESH_TORCH_PROFILE_DURATION: '0'
+        ATOMESH_DROP_HOST_CACHES: '1'
+        ATOMESH_DROP_HOST_CACHES_RANKS: 0,1
+        ATOMESH_HOST_CACHE_DROP_TIMEOUT: '900'
+    server:
+      common_args:
+        served_model_name: MiniMaxAI/MiniMax-M3.1-Flash
+        trust_remote_code: true
+        kv_cache_dtype: fp8
+        block_size: 128
+        enable_prefix_caching: true
+        gpu_memory_utilization: 0.9
+        max_model_len: 1048576
+        max_num_batched_tokens: 32768
+        online_quant_config: '{"global_quant_config":"ptpc_fp8","exclude_layer":["lm_head","model.embed_tokens","vision_tower","multi_modal_projector","patch_merge_mlp","*block_sparse_moe"]}'
+        method: dspark
+        draft_model: ${ATOMESH_MODEL_ROOT}/.huggingface/hub/models--amd--MiniMax-M3.1-Flash-Quark-MXFP4/snapshots/0a00e0e39fc00499b23efccc18a8ea63fce5c44c/dspark
+        num_speculative_tokens: 7
+        # Performance-only: the golden acceptance length of DSpark7.
+        spec_decode_acceptance_length: 4.04
+        # Every sparse layer computes its own top-k, as the native config does.
+        hf_overrides: '{"use_index_cache": false, "index_topk_freq": 1}'
+        extra_args: --index-cache-dtype mxfp4
+    service:
+      prefill:
+        cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64]'
+      decode:
+        cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64]'
+    accuracy:
+      task: gsm8k
+      fewshot: 20
+      limit: null
+      model_type: local-chat-completions
+      endpoint: chat/completions
+      max_gen_toks: 16384
+      apply_chat_template: true
+      fewshot_as_multiturn: true
+      threshold: 0.94
+    suites:
+      mooncake_store:
+      - &m31_agentx_1p2d
+        name: m31-agentx-1p2d-c160
+        topology: 1p2d
+        display_topology: 1P2D-CPP4-TP4-MXFP4
+        pd_worker_layout: packed_nodes
+        nodes: ${ATOMESH_2P1D_NODES}
+        isl:
+        - 1048576
+        osl: 1024
+        concurrency:
+        - 160
+        prefill:
+          workers: 1
+          tp: 1
+          extra_args: --pipeline-parallel-size 4 --enforce-eager --max-num-batched-tokens 8192
+        decode: &m31_agentx_1p2d_decode
+          workers: 2
+          tp: 4
+          cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112]'
+        server:
+          common_args:
+            max_num_seqs: 320
+            decode_max_num_seqs: 112
+        env:
+          prefill:
+            HIP_VISIBLE_DEVICES: 0,1,2,3
+            # The last stage also holds the DSpark draft, so it gets the fewest.
+            VLLM_PP_LAYER_PARTITION: 16,16,16,12
+            MOONCAKE_STORE: '1'
+            # One Store pool per prefill NIC, 4.3 TiB over both nodes: one
+            # master for all eight owners stalled a stage's NIC within 20 min.
+            MOONCAKE_STORE_POOLS: per_nic
+            MOONCAKE_STORE_OWNERS: 0:640:rdma0;0:640:rdma1;1:640:rdma2;1:640:rdma3
+            MOONCAKE_STORE_DECODE_OWNERS: 0:448:rdma0;0:448:rdma1;1:448:rdma2;1:448:rdma3
+            MOONCAKE_STORE_PAGE_CACHE_DROP_DIRS: ${ATOMESH_MODEL_ROOT}
+            MOONCAKE_STORE_COMPACT_TIMEOUT: '1800'
+            OFFLOAD_PROFILE: '1'
+            OFFLOAD_MIN_LOAD_TOKENS: '0'
+            OFFLOAD_COPY_WORKERS: '2'
+            OFFLOAD_LOAD_WORKERS: '2'
+            OFFLOAD_COPY_HIGH_PRIORITY: '1'
+            PREFILL_KV_TRANSFER_CONFIG: '{"kv_connector":"mooncake","kv_role":"kv_producer","proxy_ip":"${ROLE_IP}","handshake_port":${HANDSHAKE_PORT},"protocol":"rdma","enable_chunked_transfer":true,"chunked_admission_timeout_s":900}'
+          decode:
+            HIP_VISIBLE_DEVICES: 4,5,6,7
+            DECODE_KV_TRANSFER_CONFIG: '{"kv_connector":"mooncake","kv_role":"kv_consumer","proxy_ip":"${ROLE_IP}","handshake_port":${HANDSHAKE_PORT},"protocol":"rdma","ib_enable_alternate_hca":true,"ib_hca_count":8,"pd_admission":{"enabled":true,"max_pending_kv_fraction":0.15,"min_free_kv_fraction":0.1}}'
+        benchmark:
+          kind: aiperf_agentic
+          agentx_harness_version: 1.0.12
+          agentx_recipe_defaults: true
+          scenario: agentx
+          max_context_length: 1048576
+          public_dataset: semianalysis_cc_traces_weka_062126
+          benchmark_duration: 3600
+          http_tcp_user_timeout: 900000
+          wait_server_timeout: 7200
+          wait_router_timeout: 600
+        run_eval: false
+        runner:
+          # These deny the privileged host cache drop or had GPUs held by
+          # other jobs on pit2-p03.
+          exclude_nodes: pit2-p03-g03,pit2-p03-g07,pit2-p03-g08,pit2-p03-g10,pit2-p03-g12,pit2-p03-g15,pit2-p03-g23,pit2-p03-g25,pit2-p03-g27,pit2-p03-g37,pit2-p03-g40
+          time_limit: 04:00:00
+        router:
+          policy: cache_aware
+          balance_abs_threshold: 2
+      - <<: *m31_agentx_1p2d
+        name: m31-agentx-1p2d-c180
+        concurrency:
+        - 180
+        decode:
+          <<: *m31_agentx_1p2d_decode
+          cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,120]'
+        server:
+          common_args:
+            max_num_seqs: 360
+            decode_max_num_seqs: 120
+      - <<: *m31_agentx_1p2d
+        name: m31-agentx-1p2d-c200
+        concurrency:
+        - 200
+        decode:
+          <<: *m31_agentx_1p2d_decode
+          cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,136]'
+        server:
+          common_args:
+            max_num_seqs: 400
+            decode_max_num_seqs: 136
+      # At 0.94 a decode GPU keeps 14.8 GiB free at the serving peak; 0.96
+      # would leave about 9 GiB.
+      - <<: *m31_agentx_1p2d
+        name: m31-agentx-1p2d-c220
+        concurrency:
+        - 220
+        decode:
+          <<: *m31_agentx_1p2d_decode
+          cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,144,152]'
+          extra_args: --gpu-memory-utilization 0.94
+        server:
+          common_args:
+            max_num_seqs: 440
+            decode_max_num_seqs: 152
+      - <<: *m31_agentx_1p2d
+        name: m31-agentx-1p2d-c240
+        concurrency:
+        - 240
+        decode:
+          <<: *m31_agentx_1p2d_decode
+          cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,144,160]'
+          extra_args: --gpu-memory-utilization 0.94
+        server:
+          common_args:
+            max_num_seqs: 480
+            decode_max_num_seqs: 160
