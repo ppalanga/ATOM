@@ -100,6 +100,7 @@ impl Router {
             Some(&request.headers),
             &worker,
         );
+        crate::observability::route_trace::record_dispatch(metrics_labels::WORKER_REGULAR, &worker);
         let load = WorkerLoadGuard::new(worker.clone(), Some(&request.headers));
         let headers = match header_utils::inference_request_headers(
             &request.headers,

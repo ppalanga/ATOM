@@ -241,7 +241,7 @@ pub async fn concurrency_limit_middleware(
     match app_state.context.admission.acquire("http").await {
         Ok(lease) => {
             MeshMetrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
-            let response = next.run(request).await;
+            let response = crate::observability::route_trace::scope(request, next).await;
             crate::core::AttachedBody::wrap_response(response, lease)
         }
         Err(error) => {

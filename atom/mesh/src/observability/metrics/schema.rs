@@ -520,7 +520,7 @@ pub const METRIC_INVENTORY: &[MetricSpec] = &[
         name: names::SELECTED_DP_RANK_TOTAL,
         kind: MetricKind::Counter,
         help: "Dispatched requests after rank mapping by pool, worker (base URL), dp_rank",
-        status: MetricStatus::Planned,
+        status: MetricStatus::Active,
     },
     MetricSpec {
         name: names::ROUTE_CACHE_TOKENS_TOTAL,

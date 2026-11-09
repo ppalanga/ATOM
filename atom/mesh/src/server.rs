@@ -343,6 +343,7 @@ pub struct ServerConfig {
     pub log_dir: Option<String>,
     pub log_level: Option<String>,
     pub json_log: bool,
+    pub route_log_sample_rate: f64,
     pub prometheus_config: Option<PrometheusConfig>,
     pub request_timeout_secs: u64,
     pub request_id_headers: Option<Vec<String>>,
@@ -496,6 +497,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     if let Some(prometheus_config) = &config.prometheus_config {
         metrics::start_prometheus(prometheus_config.clone());
     }
+    crate::observability::route_trace::set_sample_rate(config.route_log_sample_rate);
 
     info!(
         "Starting router on {}:{} | mode: {:?} | policy: {:?} | max_payload: {}MB",

@@ -459,6 +459,7 @@ impl PDRouter {
                 policy_name,
             );
             policy.on_dispatch(kind, headers, worker);
+            crate::observability::route_trace::record_dispatch(kind, worker);
         }
         Ok(Arc::new(ReservedPair {
             load: parking_lot::Mutex::new(Some([

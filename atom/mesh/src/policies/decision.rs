@@ -8,7 +8,10 @@
 use std::sync::Arc;
 
 use super::LoadBalancingPolicy;
-use crate::{core::Worker, observability::metrics::MeshMetrics};
+use crate::{
+    core::Worker,
+    observability::{metrics::MeshMetrics, route_trace},
+};
 
 /// Branch for selections that found no healthy candidate.
 pub(crate) const NO_HEALTHY_WORKERS: &str = "no_healthy_workers";
@@ -68,6 +71,7 @@ pub(crate) fn report<P: LoadBalancingPolicy + ?Sized>(
     if let Some(result) = decision.affinity {
         MeshMetrics::record_session_affinity(pool, result);
     }
+    route_trace::record_selection(pool, name, selected, decision);
 }
 
 #[cfg(test)]

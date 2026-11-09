@@ -309,6 +309,12 @@ pub struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Logging")]
     pub json_log: bool,
 
+    /// Fraction of inference requests (0 to 1) that log their routing decisions
+    /// at info level under target mesh::route; the x-mesh-route-trace request
+    /// header logs a single request regardless
+    #[arg(long, default_value_t = 0.0, help_heading = "Logging")]
+    pub route_log_sample_rate: f64,
+
     // ==================== Prometheus Metrics ====================
     /// Port to expose Prometheus metrics
     #[arg(long, default_value_t = 29000, help_heading = "Prometheus Metrics")]
@@ -697,6 +703,7 @@ impl CliArgs {
             log_dir: self.log_dir.clone(),
             log_level: Some(self.log_level.clone()),
             json_log: self.json_log,
+            route_log_sample_rate: self.route_log_sample_rate,
             prometheus_config,
             request_timeout_secs: self.request_timeout_secs,
             request_id_headers: if self.request_id_headers.is_empty() {
@@ -864,6 +871,7 @@ impl Default for CliArgs {
             log_dir: None,
             log_level: "info".to_string(),
             json_log: false,
+            route_log_sample_rate: 0.0,
             prometheus_port: 29_000,
             prometheus_host: "0.0.0.0".to_string(),
             prometheus_duration_buckets: Vec::new(),
