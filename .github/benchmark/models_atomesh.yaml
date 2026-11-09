@@ -2733,6 +2733,13 @@ models:
           decode:
             HIP_VISIBLE_DEVICES: 4,5,6,7
             DECODE_KV_TRANSFER_CONFIG: '{"kv_connector":"mooncake","kv_role":"kv_consumer","proxy_ip":"${ROLE_IP}","handshake_port":${HANDSHAKE_PORT},"protocol":"rdma","ib_enable_alternate_hca":true,"ib_hca_count":8,"pd_admission":{"enabled":true,"max_pending_kv_fraction":0.15,"min_free_kv_fraction":0.1}}'
+            ATOM_M3_INDEXER_CP: '1'
+            # CP widens the fused QKV GEMM to N=2944, which the image's aiter
+            # tables lack. Setting the variable replaces aiter's merge of
+            # configs/ and model_configs/, so it lists the image's tables, then
+            # ours.
+            AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE: >-
+              /app/aiter-test/aiter/configs/a8w8_bpreshuffle_tuned_gemm.csv:/app/aiter-test/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_glm47.csv:/app/aiter-test/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_glm5.2.csv:/app/aiter-test/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_glm5_3_flash.csv:/app/aiter-test/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_kimik3.csv:/app/aiter-test/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_kimik3tp8.csv:/app/aiter-test/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_minimax_m3.csv:/app/aiter-test/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_qwen3_5_397b_a17b_mxfp4_attnfp8.csv:/app/aiter-test/aiter/configs/model_configs/dsv3_a8w8_bpreshuffle_tuned_gemm.csv:/app/aiter-test/aiter/configs/model_configs/glm5_a8w8_bpreshuffle_tuned_gemm.csv:/app/aiter-test/aiter/configs/model_configs/qwen38_flash_next_a8w8_bpreshuffle_tuned_gemm.csv:/workspace/ATOM/.github/benchmark/aiter_configs/a8w8_bpreshuffle_tuned_gemm_minimax_m3_icp.csv
         benchmark:
           kind: aiperf_agentic
           agentx_harness_version: 1.0.12
@@ -2775,8 +2782,6 @@ models:
           common_args:
             max_num_seqs: 400
             decode_max_num_seqs: 136
-      # At 0.94 a decode GPU keeps 14.8 GiB free at the serving peak; 0.96
-      # would leave about 9 GiB.
       - <<: *m31_agentx_1p2d
         name: m31-agentx-1p2d-c220
         concurrency:
@@ -2784,7 +2789,6 @@ models:
         decode:
           <<: *m31_agentx_1p2d_decode
           cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,144,152]'
-          extra_args: --gpu-memory-utilization 0.94
         server:
           common_args:
             max_num_seqs: 440
@@ -2796,7 +2800,6 @@ models:
         decode:
           <<: *m31_agentx_1p2d_decode
           cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,144,160]'
-          extra_args: --gpu-memory-utilization 0.94
         server:
           common_args:
             max_num_seqs: 480
