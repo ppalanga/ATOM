@@ -409,6 +409,11 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
                 // Increment processed counter
                 workers[idx].increment_processed();
 
+                let decision = RouteDecision {
+                    estimated_hit_ratio: (workers[idx].url() == tenant_url)
+                        .then_some(match_rate as f64),
+                    ..decision
+                };
                 decision::report(self, workers, Some(idx), decision);
                 return Some(idx);
             }

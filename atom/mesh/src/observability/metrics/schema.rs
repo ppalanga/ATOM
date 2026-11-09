@@ -526,19 +526,19 @@ pub const METRIC_INVENTORY: &[MetricSpec] = &[
         name: names::ROUTE_CACHE_TOKENS_TOTAL,
         kind: MetricKind::Counter,
         help: "Tokens of routed requests whose response reported cached tokens by pool, kind (prompt/cached)",
-        status: MetricStatus::Planned,
+        status: MetricStatus::Active,
     },
     MetricSpec {
         name: names::ROUTE_CACHE_ESTIMATE_TOKENS_TOTAL,
         kind: MetricKind::Counter,
         help: "Tokens of routed requests with a router cache estimate by pool, kind (prompt/estimated/actual)",
-        status: MetricStatus::Planned,
+        status: MetricStatus::Active,
     },
     MetricSpec {
         name: names::ROUTE_CACHE_ESTIMATE_ERROR_RATIO,
         kind: MetricKind::Histogram,
         help: "Per-request (estimated - actual) cached tokens over prompt tokens by pool",
-        status: MetricStatus::Planned,
+        status: MetricStatus::Active,
     },
     MetricSpec {
         name: names::WORKER_CB_STATE,

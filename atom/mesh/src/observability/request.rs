@@ -2,6 +2,7 @@
 //! The owner lives through body completion or cancellation, outside backend retries.
 use super::{
     metrics::{bool_to_static_str, metrics_labels, MeshMetrics},
+    route_trace::{self, RouteTrace},
     ttft::FirstOutputSse,
     usage::UsageObserver,
 };
@@ -17,6 +18,7 @@ use http::StatusCode;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Instant,
 };
@@ -32,6 +34,7 @@ pub(crate) struct RequestMetrics {
     error: Option<&'static str>,
     detector: FirstOutputSse,
     usage: UsageObserver,
+    route: Option<Arc<RouteTrace>>,
 }
 impl RequestMetrics {
     pub fn new(
@@ -66,6 +69,7 @@ impl RequestMetrics {
             error: Some("canceled"),
             detector: FirstOutputSse::default(),
             usage: UsageObserver::default(),
+            route: route_trace::current(),
         }
     }
     #[cfg(feature = "ext-proc")]
@@ -140,7 +144,10 @@ impl Drop for RequestMetrics {
                 error,
             );
         }
-        if let Some((prompt, completion)) = self.usage.usage(self.streaming) {
+        if let Some((prompt, completion, cached)) = self.usage.usage(self.streaming) {
+            if let (Some(route), Some(cached)) = (&self.route, cached) {
+                route.reconcile(prompt, cached);
+            }
             for (kind, token_type, count) in [
                 ("prompt", metrics_labels::TOKEN_INPUT, prompt),
                 ("completion", metrics_labels::TOKEN_OUTPUT, completion),

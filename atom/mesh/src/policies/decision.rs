@@ -24,6 +24,9 @@ pub(crate) struct RouteDecision {
     pub match_ratio: Option<f64>,
     /// Session affinity result: hit, new, rebind or expired.
     pub affinity: Option<&'static str>,
+    /// Expected prefix cache hit ratio on the selected worker, reconciled
+    /// against the cached tokens the response reports.
+    pub estimated_hit_ratio: Option<f64>,
 }
 
 impl RouteDecision {

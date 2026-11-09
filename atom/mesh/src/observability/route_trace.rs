@@ -1,4 +1,5 @@
-//! Per-request routing trace behind the sampled `Selected worker` log.
+//! Per-request routing trace behind the sampled `Selected worker` log and the
+//! reconciliation of the router's cache estimate with the reported usage.
 //!
 //! Inference routes run inside [`scope`]. Policies select and routers dispatch
 //! on the request task before the response is returned, so both reach the
@@ -11,7 +12,11 @@ use parking_lot::Mutex;
 use rand::Rng;
 use tracing::info;
 
-use crate::{core::Worker, observability::metrics::MeshMetrics, policies::decision::RouteDecision};
+use crate::{
+    core::Worker,
+    observability::metrics::{metrics_labels, MeshMetrics},
+    policies::decision::RouteDecision,
+};
 
 /// Request header that logs the routing decisions of one request whatever the sample rate.
 pub const ROUTE_TRACE_HEADER: &str = "x-mesh-route-trace";
@@ -29,10 +34,36 @@ pub fn set_sample_rate(rate: f64) {
 }
 
 #[derive(Default)]
-struct RouteTrace {
+pub(crate) struct RouteTrace {
     log: bool,
     /// Latest policy selection per pool; retries replace it.
     selections: Mutex<Vec<Selection>>,
+}
+
+impl RouteTrace {
+    /// Compares the cached prompt tokens a response reported with the router's
+    /// estimate on the pool that served the prompt.
+    pub(crate) fn reconcile(&self, prompt: u64, cached: u64) {
+        let selections = self.selections.lock();
+        let Some(selection) = selections.iter().find(|selection| {
+            matches!(
+                selection.pool,
+                metrics_labels::WORKER_PREFILL | metrics_labels::WORKER_REGULAR
+            )
+        }) else {
+            return;
+        };
+        MeshMetrics::record_route_cache_tokens(selection.pool, prompt, cached);
+        if let Some(ratio) = selection.decision.estimated_hit_ratio {
+            let estimated = (ratio * prompt as f64).round() as u64;
+            MeshMetrics::record_route_cache_estimate(selection.pool, prompt, estimated, cached);
+        }
+    }
+}
+
+/// The current request's trace, for observers that outlive the handler.
+pub(crate) fn current() -> Option<Arc<RouteTrace>> {
+    TRACE.try_with(Arc::clone).ok()
 }
 
 struct Selection {
@@ -84,11 +115,23 @@ pub(crate) fn record_selection(
 pub(crate) fn record_dispatch(pool: &'static str, worker: &Arc<dyn Worker>) {
     MeshMetrics::record_selected_dp_rank(pool, worker.base_url(), worker.dp_rank());
     let _ = TRACE.try_with(|trace| {
+        let mut selections = trace.selections.lock();
+        let selection = selections
+            .iter_mut()
+            .find(|selection| selection.pool == pool);
+        let remapped = selection
+            .as_ref()
+            .is_some_and(|selection| selection.worker.url() != worker.url());
+        let selection = selection.map(|selection| {
+            if remapped {
+                // DP ranks keep separate KV caches, so the estimate does not carry over.
+                selection.decision.estimated_hit_ratio = None;
+            }
+            &*selection
+        });
         if !trace.log {
             return;
         }
-        let selections = trace.selections.lock();
-        let selection = selections.iter().find(|selection| selection.pool == pool);
         let decision = selection.map(|selection| selection.decision);
         info!(
             target: "mesh::route",
@@ -98,8 +141,8 @@ pub(crate) fn record_dispatch(pool: &'static str, worker: &Arc<dyn Worker>) {
             worker = worker.base_url(),
             dp_rank = worker.dp_rank(),
             remapped_from = selection
-                .map(|selection| selection.worker.url())
-                .filter(|url| *url != worker.url()),
+                .filter(|_| remapped)
+                .map(|selection| selection.worker.url()),
             match_ratio = decision.and_then(|decision| decision.match_ratio),
             cost = decision.and_then(|decision| decision.cost),
             affinity = decision.and_then(|decision| decision.affinity),
@@ -116,7 +159,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::core::{BasicWorkerBuilder, DPAwareWorkerBuilder, WorkerType};
+    use crate::{
+        core::{BasicWorkerBuilder, DPAwareWorkerBuilder, WorkerType},
+        observability::request::RequestMetrics,
+    };
 
     #[derive(Clone, Default)]
     struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -250,5 +296,43 @@ mod tests {
             assert!(logs.contains(field), "missing {field} in\n{logs}");
         }
         assert!(traced(false, run).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reported_cached_tokens_are_reconciled_with_the_dispatched_estimate() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let body = r#"{"usage":{"prompt_tokens":100,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":40}}}"#;
+
+        // The second request is remapped to another rank, which drops the estimate.
+        for dispatched_rank in [0, 1] {
+            let request = async {
+                let decision = RouteDecision {
+                    estimated_hit_ratio: Some(0.5),
+                    ..RouteDecision::branch("affinity")
+                };
+                record_selection("prefill", "cache_aware", Some(&prefill_rank(0)), decision);
+                record_dispatch("prefill", &prefill_rank(dispatched_rank));
+                RequestMetrics::new("http", "pd", "m", "/v1/chat/completions", false)
+                    .wrap_response(Response::new(Body::from(body)))
+            };
+            let response = TRACE.scope(Arc::default(), request).await;
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+        }
+
+        let rendered = handle.render();
+        for line in [
+            r#"mesh_route_cache_tokens_total{pool="prefill",kind="prompt"} 200"#,
+            r#"mesh_route_cache_tokens_total{pool="prefill",kind="cached"} 80"#,
+            r#"mesh_route_cache_estimate_tokens_total{pool="prefill",kind="prompt"} 100"#,
+            r#"mesh_route_cache_estimate_tokens_total{pool="prefill",kind="estimated"} 50"#,
+            r#"mesh_route_cache_estimate_tokens_total{pool="prefill",kind="actual"} 40"#,
+            r#"mesh_route_cache_estimate_error_ratio_count{pool="prefill"} 1"#,
+        ] {
+            assert!(rendered.contains(line), "missing {line} in\n{rendered}");
+        }
     }
 }
