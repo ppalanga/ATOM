@@ -18,6 +18,7 @@ from numbers import Real
 from typing import Any, NamedTuple
 
 from atom.kv_transfer.offload import config as offcfg
+from atom.kv_transfer.offload.mooncake_store.layouts import require_mooncake_layout
 from atom.kv_transfer.offload.mooncake_store.nic import parse_device_list
 
 KEY_PREFIX = "mooncake_store."
@@ -191,12 +192,7 @@ def check_engine_compatibility(cfg: MooncakeStoreOffloadConfig, config: Any) -> 
         ValueError: The model uses neither dense nor M3 PAGE layout, DCP > 1, or the
             chunk is not a whole number of KV blocks.
     """
-    layout = offcfg.select_offload_layout(config)
-    if layout not in ("dense", "m3"):
-        raise ValueError(
-            f"the Mooncake Store offload moves only the dense KV layout or M3 PAGE layout; this "
-            f"model resolves to {layout!r}"
-        )
+    require_mooncake_layout(offcfg.select_offload_layout(config))
     dcp = int(getattr(config, "decode_context_parallel_size", 1) or 1)
     if dcp > 1:
         raise ValueError(

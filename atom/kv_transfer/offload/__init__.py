@@ -25,6 +25,21 @@ Registers three backends with the shared KV connector factory:
 
 from atom.kv_transfer.disaggregation.factory import KVConnectorFactory
 
+
+def offload_layout_reads_block_regions(config) -> bool:
+    """Whether this model's offload codec reads the PAGE region map.
+
+    The dense codec builds from ``KVCacheTensor``s and ignores the map. Every
+    other layout packs PAGE bytes from it, and which layout applies is a
+    property of the model. ``offload.config`` imports torch, and this package
+    is imported while backends are registered, so the selector is loaded when
+    the question is asked.
+    """
+    from atom.kv_transfer.offload.config import select_offload_layout
+
+    return select_offload_layout(config) != "dense"
+
+
 KVConnectorFactory.register(
     "lmcache_offload",
     worker_module="atom.kv_transfer.offload.connector",
@@ -34,10 +49,9 @@ KVConnectorFactory.register(
     aliases=("LMCacheOffloadConnector", "LMCacheConnectorV1"),
     requires_pd_staging=False,
     offload=True,
-    # The dense codec builds from `KVCacheTensor`s and ignores the region map;
-    # the hybrid, m3 and kimi_k3 layouts do read it, and which one applies comes
-    # from the model, so `topology_reads_block_regions` refines this by layout.
-    reads_block_regions=False,
+    # The dense codec ignores the region map; every other layout reads it.
+    # Which one applies comes from the model, so the registration says so.
+    reads_block_regions=offload_layout_reads_block_regions,
 )
 
 KVConnectorFactory.register(
@@ -62,8 +76,7 @@ KVConnectorFactory.register(
     scheduler_class="MooncakeStoreOffloadScheduler",
     requires_pd_staging=False,
     offload=True,
-    # The dense codec builds from `KVCacheTensor`s and ignores the region map.
-    # The m3 layout reads it, and which one applies comes from the model, so
-    # `topology_reads_block_regions` refines this by layout.
-    reads_block_regions=False,
+    # Same predicate as lmcache_offload. Layouts other than dense and m3 are
+    # refused at startup; see `check_engine_compatibility`.
+    reads_block_regions=offload_layout_reads_block_regions,
 )
