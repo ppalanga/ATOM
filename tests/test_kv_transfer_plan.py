@@ -43,24 +43,26 @@ def execute_plan(plan, source, destination):
 
 
 @pytest.mark.parametrize("rank", range(4))
-@pytest.mark.parametrize("ownership", ["heads", "tokens"])
+@pytest.mark.parametrize("ownership", ["heads", "replicated_heads", "tokens"])
 def test_same_multihead_layout_changes_ownership_with_peer_topology(rank, ownership):
-    # Token-major, four heads, four bytes/head. No attention-family input.
+    # TP4 splits four KV heads or replicates two. No attention-family input.
+    heads = 2 if ownership == "replicated_heads" else 4
     source = (
-        torch.arange(4 * 8 * 4 * 4, dtype=torch.int64)
+        torch.arange(4 * 8 * heads * 4, dtype=torch.int64)
         .remainder(251)
         .to(torch.uint8)
-        .view(4, 8, 4, 4)
+        .view(4, 8, heads, 4)
     )
     ids = [3, 0, 2]
-    if ownership == "heads":
+    if ownership != "tokens":
         destination = torch.zeros(5, 8, 1, 4, dtype=torch.uint8)
         dst_ids = [4, 1, 3]
         topology = TransferTopology(target_tp=4, target_tp_rank=rank)
         layout = RegionLayout(
-            0, 7, destination.data_ptr(), 128, 32, True, (8, 4), (8, 1)
+            0, 7, destination.data_ptr(), 32 * heads, 32, True, (8, heads), (8, 1)
         )
-        expected = source[ids, :, rank : rank + 1, :]
+        head = rank * heads // 4
+        expected = source[ids, :, head : head + 1, :]
     else:
         destination = torch.zeros(5, 8, 4, 4, dtype=torch.uint8)
         dst_ids = [3]
@@ -71,6 +73,7 @@ def test_same_multihead_layout_changes_ownership_with_peer_topology(rank, owners
         ordered = source[ids].reshape(-1, 4, 4)
         expected = ordered[(torch.arange(24) // 2) % 4 == rank]
     plan = build_transfer_plan(topology, [layout], ids, dst_ids, 8)
+    assert plan.wire_layout == (TOKEN_UNITS if ownership == "tokens" else PAGE_UNITS)
     execute_plan(plan, source, destination)
     actual = destination[dst_ids].reshape(-1)
     want = expected.reshape(-1)
@@ -100,20 +103,6 @@ def test_tp_replicated_units_can_also_be_partitioned_by_dcp(rank):
     assert plan.wire_layout == TOKEN_UNITS
     assert torch.equal(destination[2], source[[1, 0]].reshape(16, 4)[1::2])
     assert (destination[:2] == 255).all()
-
-
-@pytest.mark.parametrize("rank", range(4))
-def test_more_tp_ranks_than_kv_heads_replicate_the_correct_head(rank):
-    source = torch.arange(64, dtype=torch.uint8).view(2, 4, 2, 4)
-    destination = torch.zeros(2, 4, 1, 4, dtype=torch.uint8)
-    layout = RegionLayout(0, 0, destination.data_ptr(), 32, 16, True, (4, 2), (4, 1))
-    plan = build_transfer_plan(
-        TransferTopology(target_tp=4, target_tp_rank=rank), [layout], [1], [0], 4
-    )
-    execute_plan(plan, source, destination)
-    assert plan.wire_layout == PAGE_UNITS
-    assert torch.equal(destination[0, :, 0], source[1, :, rank // 2])
-    assert not destination[1].any()
 
 
 def test_unknown_token_layout_and_composed_head_partition_are_rejected():

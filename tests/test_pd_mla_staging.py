@@ -480,6 +480,7 @@ def test_a_failed_gather_ends_before_its_slot_is_released(monkeypatch, landing):
     assert events[:2] == ["sync", "release"]
     assert events[-1] == "sync"  # the shared index upload lifetime also ends
     assert conn._kv_staging_slots.free == [0]
+    assert conn._nic.labels == []  # gather failed before any RDMA submission
     if landing:
         # Never announced, so the credit went back too.
         assert conn._landing_credits.acquire("consumer:1", 1, 0) == 0

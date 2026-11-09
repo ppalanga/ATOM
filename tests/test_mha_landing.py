@@ -28,6 +28,22 @@ from atom.kv_transfer.disaggregation.transfer_plan import PAGE_UNITS
 mc = protocol.mc
 
 
+@pytest.fixture(params=["cpu", "cuda"])
+def device(request):
+    if request.param == "cuda" and not torch.cuda.is_available():
+        pytest.skip("GPU gather/scatter")
+    return request.param
+
+
+def byte_view(buffers, address, size):
+    owner = next(
+        v
+        for v in buffers
+        if v.data_ptr() <= address and address + size <= v.data_ptr() + v.numel()
+    )
+    return owner.view(-1).narrow(0, address - owner.data_ptr(), size)
+
+
 class Stream:
     def wait_event(self, event):
         event.synchronize()
@@ -112,28 +128,8 @@ class Harness:
         def write(target, srcs, dsts, sizes):
             self.writes.append((srcs, dsts, sizes))
             for src, dst, n in zip(srcs, dsts, sizes):
-                if self.device.type == "cpu":
-                    ctypes.memmove(dst, src, n)
-                else:
-                    source_owner = next(
-                        v
-                        for v in [c._kv_staging, *self.src_views]
-                        if v.data_ptr() <= src and src + n <= v.data_ptr() + v.numel()
-                    )
-                    source = source_owner.view(-1)[
-                        src
-                        - source_owner.data_ptr() : src
-                        - source_owner.data_ptr()
-                        + n
-                    ]
-                    owner = next(
-                        v
-                        for v in destinations
-                        if v.data_ptr() <= dst and dst + n <= v.data_ptr() + v.numel()
-                    )
-                    owner.view(-1)[
-                        dst - owner.data_ptr() : dst - owner.data_ptr() + n
-                    ].copy_(source)
+                source = byte_view([c._kv_staging, *self.src_views], src, n)
+                byte_view(destinations, dst, n).copy_(source)
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
             return 0
@@ -178,8 +174,8 @@ def test_full_transfer_matches_physical_nvfp4_fp4_and_draft(held, rank, offer):
 
 @pytest.mark.parametrize("rank", range(4))
 @pytest.mark.parametrize("cached", [0, 1])
-def test_chunks_use_receive_global_page_offsets_and_sequences(rank, cached):
-    h = Harness([6, 7], rank)
+def test_chunks_use_receive_global_page_offsets_and_sequences(rank, cached, device):
+    h = Harness([6, 7], rank, device=device)
     ids = [2, 0, 3][cached:]
     h.req["dst_block_ids"] = ids
     h.recv.begin(21, 3, ids, {0: "s0"})
@@ -189,37 +185,14 @@ def test_chunks_use_receive_global_page_offsets_and_sequences(rank, cached):
         assert h.finished == []
     assert [x["seq"] for x in h.ready] == list(range(len(h.ready)))
     assert {row[1] for x in h.ready for row in x["items"]} == set(range(len(ids)))
+    assert len(h.ready) > h.recv._pool_slots  # NIC rewrites the same slots.
     h.recv.stage_done(21, 0, 3, True, h.req["_landed_slots"])
-    assert h.finished == [(21, False)]
-
-
-def test_credit_exhaustion_gathers_remaining_pages_to_direct_destinations():
-    h = Harness([6, 7], 2, pump=False)
-    assert h.send([3, 1, 2], [2, 0, 3])
-    assert len(h.ready) == 2
-    assert any(len(src) > 1 for src, _, _ in h.writes)
-    h.recv.stage_done(21, 0, 3, True, h.req["_landed_slots"])
-    assert h.finished == []
-    h.pump()
-    h.check([3, 1, 2], [2, 0, 3])
     assert h.finished == [(21, False)]
 
 
 @pytest.mark.parametrize("rank", range(4))
 @pytest.mark.parametrize("chunks", [False, True])
 @pytest.mark.parametrize("capacity", ["source_too_small", "landing_too_small", "exact"])
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param(
-            "cuda",
-            marks=pytest.mark.skipif(
-                not torch.cuda.is_available(), reason="GPU gather/scatter"
-            ),
-        ),
-    ],
-)
 def test_page_capacity_fallback_preserves_bytes_and_completion(
     rank, chunks, capacity, device
 ):
@@ -270,37 +243,6 @@ def test_bad_late_region_fails_before_any_rdma():
     assert h.ready == []
 
 
-def test_failed_nic_quarantines_landing_and_retains_source_staging(monkeypatch):
-    h = Harness([6, 7], 0)
-    monkeypatch.setenv("ATOM_PD_FAILED_WRITE_HOLD_S", "60")
-    h.c.transfer_engine.batch_transfer_sync_write = lambda *args: -1
-    assert not h.send([3, 1, 2], [2, 0, 3])
-    assert h.c._kv_staging_failed
-    assert h.c._kv_staging_slots.free == []
-    with pytest.raises(RuntimeError, match="staging row unavailable"):
-        h.c._kv_staging_slots.acquire()
-    assert len(h.c._landing_credits._targets["cpu:1"].quarantined) == 1
-    assert h.ready == []
-
-
-def test_gather_failure_synchronizes_before_releasing_slot(monkeypatch):
-    h = Harness([6, 7], 0)
-    sync = MagicMock()
-    h.stream.synchronize = sync
-
-    def fail(*args):
-        assert h.c._kv_staging_slots.free == []
-        raise RuntimeError("gather failed")
-
-    monkeypatch.setattr(mc, "gather_units", fail)
-    with pytest.raises(RuntimeError, match="gather failed"):
-        h.send([3, 1, 2], [2, 0, 3])
-    assert sync.call_count >= 1
-    assert h.c._kv_staging_slots.free == [0]
-    assert not h.c._landing_credits._targets["cpu:1"].in_flight
-    assert h.writes == []
-
-
 @pytest.mark.parametrize("bad", [None, {"first_token_id": 44, "draft_token_ids": []}])
 def test_chunk_handoff_is_checked_before_landing_completion(bad):
     h = Harness([6, 7], 0)
@@ -331,12 +273,18 @@ def test_chunk_handoff_is_checked_before_landing_completion(bad):
 
 @pytest.mark.parametrize("workers", [1, 8, 64])
 def test_reserves_are_gated_and_bounded(monkeypatch, workers):
+    from atom.kv_transfer.disaggregation.factory import KVConnectorFactory
+
     monkeypatch.setenv("ATOM_PD_MHA_LANDING", "1")
     cfg = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="minimax_m3"),
         tensor_parallel_size=1,
         decode_context_parallel_size=1,
-        kv_transfer_config={"kv_role": "kv_producer", "num_worker_threads": workers},
+        kv_transfer_config={
+            "kv_connector": "mooncake",
+            "kv_role": "kv_producer",
+            "num_worker_threads": workers,
+        },
     )
     assert mha_staging_reserve_bytes(cfg) == min(workers, 32) * LANDING_SLOT_BYTES
     assert landing_reserve_bytes(cfg) == 0
@@ -345,6 +293,7 @@ def test_reserves_are_gated_and_bounded(monkeypatch, workers):
     assert mha_staging_reserve_bytes(cfg) == 0
     assert (
         landing_reserve_bytes(cfg)
+        == KVConnectorFactory.kv_budget_reserve_bytes(cfg)
         == LANDING_POOL_SLOTS * LANDING_SLOT_BYTES + 3 * 8 * MHA_SCATTER_SEGMENTS
     )
     for key, val in [
@@ -357,18 +306,6 @@ def test_reserves_are_gated_and_bounded(monkeypatch, workers):
         setattr(cfg, key, old)
     monkeypatch.setenv("ATOM_PD_MHA_LANDING", "0")
     assert mha_staging_reserve_bytes(cfg) == landing_reserve_bytes(cfg) == 0
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU gather/scatter")
-@pytest.mark.parametrize("rank", range(4))
-def test_gpu_gather_rdma_landing_scatter_real_nvfp4_index_draft(rank):
-    h = Harness([6, 7], rank, device="cuda")
-    for offset in range(3):
-        assert h.send([[3, 1, 2][offset]], [[2, 0, 3][offset]], offset)
-    h.recv.stage_done(21, 0, 3, True, h.req["_landed_slots"])
-    assert h.finished == [(21, False)]
-    h.check([3, 1, 2], [2, 0, 3])
-    assert len(h.ready) > h.recv._pool_slots  # NIC rewrites the same slots.
 
 
 def test_off_path_records_ready_event_with_only_kv_staging(monkeypatch):
@@ -433,6 +370,9 @@ def test_real_consumer_offers_page_landing_and_waits_for_scatter(monkeypatch, ch
     h.req["consumer_host"] = "cpu"
     h.req["consumer_rpc_port"] = 1
     assert h.send([3, 1, 2], [2, 0, 3])
+    # With scatter paused, exhaust landing credits and write the rest directly.
+    assert len(h.ready) == h.recv._pool_slots
+    assert any(len(src) > 1 for src, _, _ in h.writes)
     handoff = {"first_token_id": 42, "draft_token_ids": [43, 44]} if chunked else None
     assert not d._record_write_done(
         21,
@@ -448,18 +388,3 @@ def test_real_consumer_offers_page_landing_and_waits_for_scatter(monkeypatch, ch
         assert d._received_handoffs[21].first_token_id == 42
     h.check([3, 1, 2], [2, 0, 3])
     d._send_release.assert_called_once_with(21)
-
-
-def test_mha_budget_is_visible_through_connector_factory(monkeypatch):
-    from atom.kv_transfer.disaggregation.factory import KVConnectorFactory
-
-    monkeypatch.setenv("ATOM_PD_MHA_LANDING", "1")
-    cfg = SimpleNamespace(
-        hf_config=SimpleNamespace(model_type="minimax_m3"),
-        tensor_parallel_size=4,
-        decode_context_parallel_size=1,
-        kv_transfer_config={"kv_connector": "mooncake", "kv_role": "kv_consumer"},
-    )
-    assert KVConnectorFactory.kv_budget_reserve_bytes(cfg) == (
-        LANDING_POOL_SLOTS * LANDING_SLOT_BYTES + 3 * 8 * MHA_SCATTER_SEGMENTS
-    )

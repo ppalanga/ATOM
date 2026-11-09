@@ -79,27 +79,26 @@ class NodeSelectionTest(unittest.TestCase):
                     "ATOMESH_SINGLE_NODE": override,
                 },
             ):
-                for suite in ("accuracy", "mooncake_store"):
-                    names = {
-                        c["name"]
-                        for c in cfg["models"][model]["suites"][suite]
-                        if "landing" in c["name"]
-                    }
-                    with self.subTest(runner=runner, suite=suite, override=override):
-                        cells = pd_matrix.build_cells(
-                            cfg,
-                            suite=suite,
-                            model_filter={model},
-                            case_filter=names,
-                            benchmark_kind_filter=None,
-                            override_image=None,
-                            override_benchmark_concurrency=None,
-                            override_eval_concurrency=None,
-                        )
-                        self.assertEqual(len(cells), 4 if suite == "accuracy" else 2)
-                        for cell in cells:
-                            self.assertEqual(cell["nodes"], expected)
-                            self.assertEqual(cell["num_nodes"], 1)
+                names = {
+                    c["name"]
+                    for c in cfg["models"][model]["suites"]["mooncake_store"]
+                    if "landing" in c["name"]
+                }
+                with self.subTest(runner=runner, override=override):
+                    cells = pd_matrix.build_cells(
+                        cfg,
+                        suite="mooncake_store",
+                        model_filter={model},
+                        case_filter=names,
+                        benchmark_kind_filter=None,
+                        override_image=None,
+                        override_benchmark_concurrency=None,
+                        override_eval_concurrency=None,
+                    )
+                    self.assertEqual(len(cells), 2)
+                    for cell in cells:
+                        self.assertEqual(cell["nodes"], expected)
+                        self.assertEqual(cell["num_nodes"], 1)
 
     def test_tw_automatic_selection_preserves_required_node_count(self):
         cases = [

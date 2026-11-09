@@ -7,13 +7,14 @@ The producer packs a decode rank's MLA rows into landing slots of the
 consumer's pool and the consumer scatters them into its paged KV. Everything
 runs on CPU tensors: the NIC is a memmove, the consumer's GPU scatter is a
 memmove over the same segment table, and the ZMQ messages are routed by hand.
-The per-token path is the byte reference, as in test_pd_kv_staging.py.
+The per-token path is the byte reference, as in test_pd_mla_staging.py.
 """
 
 import ctypes
 import threading
 import time
 from contextlib import nullcontext
+from unittest.mock import Mock
 
 import msgpack
 import numpy as np
@@ -919,14 +920,7 @@ def _landed_vs_per_token(
         dest.recv.on_ready(msgpack.loads(payload))
 
     new._send_on_socket = route
-    write_slot = new._write_staging_slot
-    new.gather_indices = []
-
-    def track_index(stream, plan, index, *args, **kwargs):
-        new.gather_indices.append(index.data_ptr())
-        return write_slot(stream, plan, index, *args, **kwargs)
-
-    new._write_staging_slot = track_index
+    new._write_staging_slot = Mock(wraps=new._write_staging_slot)
     stop = threading.Event()
 
     def pump():
@@ -993,7 +987,8 @@ def test_landing_falls_back_to_staged_pages_without_credits(monkeypatch):
     assert labels.count("landed-kv") == 1
     assert "staged-kv" in labels
     # The staged rest reuses the index uploaded for landing.
-    assert len(set(new.gather_indices)) == 1
+    calls = new._write_staging_slot.call_args_list
+    assert len({call.args[2].data_ptr() for call in calls}) == 1
 
 
 def test_small_transfers_keep_the_staged_path(monkeypatch):
@@ -1134,11 +1129,7 @@ def test_a_failed_landed_write_keeps_its_slot_out_of_use(monkeypatch, outcome):
     if outcome == "failed":
         new._rdma_write = lambda *_a, **_k: False
     elif outcome == "exception":
-
-        def failed_after_submission(*args, **kwargs):
-            raise RuntimeError("NIC submission uncertain")
-
-        new._rdma_write = failed_after_submission
+        new._rdma_write = Mock(side_effect=RuntimeError("NIC submission uncertain"))
     elif outcome == "past-deadline":
         request["_deadline"] = time.monotonic() - 1
     else:
@@ -1152,12 +1143,11 @@ def test_a_failed_landed_write_keeps_its_slot_out_of_use(monkeypatch, outcome):
         new._kv_staging_slots.acquire = acquire_late
         new._rdma_write = mc.MooncakeConnector._rdma_write.__get__(new)
         new.transfer_engine = None  # never reached: the deadline passed
-    if outcome == "exception":
-        with pytest.raises(RuntimeError, match="NIC submission uncertain"):
-            mc.MooncakeConnector._execute_block_transfer(
-                new, request, "consumer:1", [0, 1, 2, 3], [3], "req", object()
-            )
-    else:
+    with (
+        pytest.raises(RuntimeError, match="NIC submission uncertain")
+        if outcome == "exception"
+        else nullcontext()
+    ):
         assert not mc.MooncakeConnector._execute_block_transfer(
             new, request, "consumer:1", [0, 1, 2, 3], [3], "req", object()
         )
@@ -1166,14 +1156,12 @@ def test_a_failed_landed_write_keeps_its_slot_out_of_use(monkeypatch, outcome):
     got = {credits.acquire("consumer:1", landing["epoch"], 0) for _ in range(3)}
     if outcome in ("failed", "exception"):
         assert got == {landing["slots"][0], None}
-    else:
-        assert got == set(landing["slots"]) | {None}
-    if outcome in ("failed", "exception"):
         assert new._kv_staging_failed
         assert len(new._kv_staging_slots.free) == 1  # failed source slot is retained
         with pytest.raises(RuntimeError, match="staging row unavailable"):
             new._kv_staging_slots.acquire()
     else:
+        assert got == set(landing["slots"]) | {None}
         assert sorted(new._kv_staging_slots.free) == [0, 1]
         assert not new._kv_staging_failed
 
