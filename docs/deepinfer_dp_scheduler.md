@@ -67,6 +67,8 @@ This mode replaces PrefillDelayer; it does not layer on top of it:
 
 - `ATOM_ENABLE_PREFILL_DELAYER`, `ATOM_PREFILL_DECODE_INTERVAL` and the other
   `ATOM_PREFILL_DELAYER_*` settings do not control this mode.
+- `--prefill-admit-policy` selects ATOM's native admission rule only. Its
+  `interval` and `adaptive` settings do not alter DeepInfer's ALL/ANY votes.
 - DP chunk-cost balancing is bypassed because it depends on the delayer's
   extra exchange and would introduce a different scheduling rule.
 - Request routing, KV allocation, chunked prefill, native sequence/token

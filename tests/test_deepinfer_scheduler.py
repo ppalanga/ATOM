@@ -319,7 +319,10 @@ def test_native_delayer_cannot_be_combined_with_deepinfer(group):
         scheduler.set_prefill_delayer(PrefillDelayer(1, None, 8))
 
 
-def test_engine_selects_deepinfer_independently_of_native_delayer_switch(monkeypatch):
+@pytest.mark.parametrize("admit_policy", ["interval", "adaptive"])
+def test_engine_selects_deepinfer_independently_of_native_delayer_switch(
+    monkeypatch, admit_policy
+):
     pytest.importorskip(
         "aiter", reason="EngineCore imports AITER's worker message queue"
     )
@@ -334,6 +337,7 @@ def test_engine_selects_deepinfer_independently_of_native_delayer_switch(monkeyp
     monkeypatch.setenv("ATOM_PREFILL_DECODE_INTERVAL", "16")
     config = atom_config_double(
         dp_scheduler="deepinfer",
+        prefill_admit_policy=admit_policy,
         enable_dp_attention=True,
         parallel_config=SimpleNamespace(data_parallel_size=1),
         deepinfer_prefill_interval=7,
