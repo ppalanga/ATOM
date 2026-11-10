@@ -3672,51 +3672,101 @@ mod e2_generate_streaming_branches {
 
 #[cfg(test)]
 mod prompt_opened_reasoning {
-    use super::test_support::chat_ctx;
-    use crate::{
-        reasoning_parser::ParserFactory,
-        routers::prepare::{chat_template::ProcessedMessages, response_context::REASONING_OPEN},
-    };
+    use crate::reasoning_dialect::{parser_factory, parser_for_model, prompt_opened_reasoning};
 
-    fn prompted(text: &str) -> bool {
-        let mut ctx = chat_ctx();
-        ctx.processed_messages = Some(ProcessedMessages {
-            text: text.into(),
-            stop_sequences: None,
-        });
-        ctx.starts_in_reasoning()
-    }
+    /// Each parser's output once its prompt is rendered, both ways the render
+    /// layer reads it: whole, primed by prepending; and streamed, primed by
+    /// feeding the opener first.
+    fn split(parser: &str, prompt: &str, deltas: &[&str]) -> [(String, String); 2] {
+        let factory = parser_factory();
+        let mut p = factory.registry().create_parser(parser).unwrap();
+        let opener = prompt_opened_reasoning(&*p, Some(prompt)).unwrap_or("");
+        let whole = p
+            .detect_and_parse_reasoning(&format!("{opener}{}", deltas.concat()))
+            .unwrap();
 
-    #[test]
-    fn only_a_prompt_ending_in_an_open_block_starts_in_reasoning() {
-        assert!(prompted("<|assistant|><think>\n"));
-        assert!(!prompted("<|assistant|><think></think>"));
-        assert!(!prompted("<|assistant|>"));
-        assert!(!chat_ctx().starts_in_reasoning());
-    }
-
-    /// The output of such a prompt: reasoning, then `</think>`, then the answer.
-    #[test]
-    fn a_primed_parser_splits_an_output_with_no_open_tag() {
-        let factory = ParserFactory::new();
-        let mut parser = factory.create("qwen3").unwrap();
-        let primed = format!("{REASONING_OPEN}17 * 3 = 51</think>51");
-        let whole = parser.detect_and_parse_reasoning(&primed).unwrap();
-        assert_eq!(
-            (whole.reasoning_text.as_str(), whole.normal_text.as_str()),
-            ("17 * 3 = 51", "51")
-        );
-
-        let mut parser = factory.create("qwen3").unwrap();
-        let _ = parser.parse_reasoning_streaming_incremental(REASONING_OPEN);
+        let mut p = factory.registry().create_parser(parser).unwrap();
+        let _ = p.parse_reasoning_streaming_incremental(opener);
         let (mut reasoning, mut normal) = (String::new(), String::new());
-        // `</think>` is one special token, so a delta carries it whole.
-        for delta in ["17 * 3", " = 51", "</think>5", "1"] {
-            let r = parser.parse_reasoning_streaming_incremental(delta).unwrap();
+        for delta in deltas {
+            let r = p.parse_reasoning_streaming_incremental(delta).unwrap();
             reasoning.push_str(&r.reasoning_text);
             normal.push_str(&r.normal_text);
         }
-        assert_eq!((reasoning.as_str(), normal.as_str()), ("17 * 3 = 51", "51"));
+        [
+            (whole.reasoning_text, whole.normal_text),
+            (reasoning, normal),
+        ]
+    }
+
+    #[test]
+    fn each_dialect_starts_in_the_block_its_prompt_opened() {
+        // (parser, prompt tail, output deltas; reasoning, content)
+        let cases: [(&str, &str, &[&str], &str, &str); 6] = [
+            (
+                "qwen3",
+                "<|assistant|><think>\n",
+                &["17 * 3", " = 51", "</think>5", "1"],
+                "17 * 3 = 51",
+                "51",
+            ),
+            ("qwen3", "<|assistant|><think></think>", &["51"], "", "51"),
+            (
+                "minimax_m3",
+                "<|assistant|><mm:think>",
+                &["R", "</mm:think>", "A"],
+                "R",
+                "A",
+            ),
+            (
+                "minimax_m3",
+                "<|assistant|>",
+                &["<mm:think>", "R", "</mm:think>", "A"],
+                "R",
+                "A",
+            ),
+            // K3 opens its answer channel straight from the think channel.
+            (
+                "kimi_k3",
+                "<|open|>think<|sep|>",
+                &[
+                    "R",
+                    "<|open|>",
+                    "response",
+                    "<|sep|>",
+                    "A",
+                    "<|close|>response<|sep|>",
+                ],
+                "R",
+                "A",
+            ),
+            (
+                "kimi_k3",
+                "<|open|>think<|sep|>",
+                &["R", "<|close|>think<|sep|>", "<|open|>response<|sep|>A"],
+                "R",
+                "A",
+            ),
+        ];
+        for (parser, prompt, deltas, reasoning, content) in cases {
+            for got in split(parser, prompt, deltas) {
+                assert_eq!(
+                    got,
+                    (reasoning.into(), content.into()),
+                    "{parser} {prompt:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn k3_and_m3_models_ahead_of_the_crate_patterns() {
+        assert_eq!(
+            parser_for_model("moonshotai/Kimi-K3.1-Pro"),
+            Some("kimi_k3")
+        );
+        assert_eq!(parser_for_model("MiniMax-M3"), Some("minimax_m3"));
+        assert_eq!(parser_for_model("Kimi-K2-Thinking"), None);
     }
 }
 

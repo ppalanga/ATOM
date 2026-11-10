@@ -1,10 +1,15 @@
 //! Resolve reasoning and tool parsers from their factories by model name or
-//! by an explicit configured parser name (with fallback warnings).
+//! by an explicit configured parser name (with fallback warnings). A model
+//! `reasoning_dialect` names is resolved as though its parser were configured.
 
 use tracing::warn;
 
-use crate::reasoning_parser::{
-    ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
+use crate::{
+    reasoning_dialect::parser_for_model,
+    reasoning_parser::{
+        ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser,
+        ReasoningParser,
+    },
 };
 
 pub(crate) fn check_reasoning_parser_availability(
@@ -12,6 +17,7 @@ pub(crate) fn check_reasoning_parser_availability(
     configured_parser: Option<&str>,
     model: &str,
 ) -> bool {
+    let configured_parser = configured_parser.or_else(|| parser_for_model(model));
     if let Some(parser_name) = configured_parser {
         reasoning_parser_factory.registry().has_parser(parser_name)
     } else {
@@ -27,6 +33,7 @@ pub(crate) fn get_reasoning_parser(
     configured_parser: Option<&str>,
     model: &str,
 ) -> ReasoningPooledParser {
+    let configured_parser = configured_parser.or_else(|| parser_for_model(model));
     if let Some(parser_name) = configured_parser {
         reasoning_parser_factory
             .registry()
@@ -49,6 +56,7 @@ pub(crate) fn create_reasoning_parser(
     configured_parser: Option<&str>,
     model: &str,
 ) -> Option<Box<dyn ReasoningParser>> {
+    let configured_parser = configured_parser.or_else(|| parser_for_model(model));
     if let Some(parser_name) = configured_parser {
         reasoning_parser_factory
             .registry()

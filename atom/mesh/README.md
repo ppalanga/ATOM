@@ -220,7 +220,7 @@ USE_ATOMESH_ENTRYPOINTS=1 python -m atom.entrypoints.openai_server mesh-only \
   --tool-call-parser json
 ```
 
-Supported reasoning parsers: `deepseek-r1`, `qwen3`, `qwen3-thinking`, `kimi`, `glm45`, `glm47`, `step3`, `minimax`.  
+Supported reasoning parsers: `deepseek-r1`, `qwen3`, `qwen3-thinking`, `kimi`, `kimi_k3`, `glm45`, `glm47`, `step3`, `minimax`, `minimax_m3`. Kimi-K3 and MiniMax-M3 models select `kimi_k3` / `minimax_m3` by name.  
 Supported tool parsers: `json`, `python`, `xml`.
 
 ## Architecture

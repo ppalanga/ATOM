@@ -18,11 +18,12 @@ use crate::{
         chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
         common::{FunctionCallDelta, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage},
     },
+    reasoning_dialect::prompt_opened_reasoning,
     reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser},
     routers::{
         prepare::{
             parser_factory_lookup::{check_reasoning_parser_availability, create_reasoning_parser},
-            response_context::{ProtocolRequest, ResponseContext, REASONING_OPEN},
+            response_context::{ProtocolRequest, ResponseContext},
             tool_constraints::{generate_tool_call_id, get_history_tool_calls_count},
         },
         render::logprob_conversion::token_logprobs_to_chat,
@@ -102,7 +103,6 @@ async fn run_chat_stream(
                 )
             })
             .unwrap_or(false);
-    let starts_in_reasoning = ctx.starts_in_reasoning();
 
     let used_json_schema = match tool_choice {
         Some(ToolChoice::Function { .. }) => true,
@@ -181,7 +181,7 @@ async fn run_chat_stream(
                         &mut reasoning_parser,
                         ctx.reasoning_parser_factory.as_ref(),
                         ctx.configured_reasoning_parser.as_deref(),
-                        starts_in_reasoning,
+                        ctx.processed_messages.as_ref().map(|p| p.text.as_str()),
                         request_id,
                         model,
                         created,
@@ -400,7 +400,7 @@ async fn process_reasoning_stream(
     reasoning_parser: &mut Option<Arc<tokio::sync::Mutex<Box<dyn ReasoningParser>>>>,
     factory: Option<&ReasoningParserFactory>,
     configured: Option<&str>,
-    starts_in_reasoning: bool,
+    prompt_text: Option<&str>,
     request_id: &str,
     model: &str,
     created: u64,
@@ -413,8 +413,8 @@ async fn process_reasoning_stream(
         };
         match create_reasoning_parser(factory, configured, model) {
             Some(mut p) => {
-                if starts_in_reasoning {
-                    let _ = p.parse_reasoning_streaming_incremental(REASONING_OPEN);
+                if let Some(opener) = prompt_opened_reasoning(&*p, prompt_text) {
+                    let _ = p.parse_reasoning_streaming_incremental(opener);
                 }
                 *reasoning_parser = Some(Arc::new(tokio::sync::Mutex::new(p)));
             }

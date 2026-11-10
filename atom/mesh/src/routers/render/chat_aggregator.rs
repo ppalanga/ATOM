@@ -13,12 +13,13 @@ use crate::{
         chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
         common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
     },
+    reasoning_dialect::prompt_opened_reasoning,
     reasoning_parser::ParserFactory as ReasoningParserFactory,
     routers::{
         comm::error,
         prepare::{
             parser_factory_lookup::{check_reasoning_parser_availability, get_reasoning_parser},
-            response_context::{ProtocolRequest, ResponseContext, REASONING_OPEN},
+            response_context::{ProtocolRequest, ResponseContext},
             tool_constraints::{
                 generate_tool_call_id, get_history_tool_calls_count, parse_json_schema_response,
             },
@@ -110,7 +111,6 @@ async fn aggregate(
             })
             .unwrap_or(false);
 
-    let starts_in_reasoning = ctx.starts_in_reasoning();
     let mut stop_decoder = ctx.stop_decoder;
     let mut choices = Vec::with_capacity(completes.len());
     for (idx, complete) in completes.iter().enumerate() {
@@ -122,7 +122,7 @@ async fn aggregate(
             &mut stop_decoder,
             history_tool_calls_count,
             reasoning_available,
-            starts_in_reasoning,
+            ctx.processed_messages.as_ref().map(|p| p.text.as_str()),
             tool_available,
             ctx.tool_parser_factory.as_ref(),
             ctx.reasoning_parser_factory.as_ref(),
@@ -185,7 +185,7 @@ async fn process_choice(
     stop_decoder: &mut StopSequenceDecoder,
     history_tool_calls_count: usize,
     reasoning_available: bool,
-    starts_in_reasoning: bool,
+    prompt_text: Option<&str>,
     tool_available: bool,
     tool_parser_factory: Option<&ToolParserFactory>,
     reasoning_parser_factory: Option<&ReasoningParserFactory>,
@@ -232,8 +232,8 @@ async fn process_choice(
             let pooled =
                 get_reasoning_parser(factory, configured_reasoning_parser, &chat_request.model);
             let mut parser = pooled.lock().await;
-            if starts_in_reasoning {
-                processed_text.insert_str(0, REASONING_OPEN);
+            if let Some(opener) = prompt_opened_reasoning(&**parser, prompt_text) {
+                processed_text.insert_str(0, opener);
             }
             match parser.detect_and_parse_reasoning(&processed_text) {
                 Ok(result) => {

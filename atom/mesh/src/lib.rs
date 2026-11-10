@@ -10,6 +10,7 @@ pub mod policies;
 pub mod python;
 pub use openai_protocol as protocols;
 pub use reasoning_parser;
+pub mod reasoning_dialect;
 pub mod routers;
 pub mod server;
 pub use llm_tokenizer as tokenizer;

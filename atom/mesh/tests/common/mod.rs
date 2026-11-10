@@ -25,7 +25,7 @@ use mesh::{
     middleware::TokenBucket,
     policies::PolicyRegistry,
     protocols::common::{Function, Tool},
-    reasoning_parser::ParserFactory as ReasoningParserFactory,
+    reasoning_dialect,
     routers::{RouterFactory, RouterTrait},
     tokenizer::registry::TokenizerRegistry,
     tool_parser::ParserFactory as ToolParserFactory,
@@ -390,7 +390,7 @@ pub async fn create_test_context_with_parsers(
     let workflow_engines = Arc::new(OnceLock::new());
 
     // Initialize parser factories
-    let reasoning_parser_factory = Some(ReasoningParserFactory::new());
+    let reasoning_parser_factory = Some(reasoning_dialect::parser_factory());
     let tool_parser_factory = Some(ToolParserFactory::new());
 
     let app_context = Arc::new(

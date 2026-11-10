@@ -349,7 +349,7 @@ impl AppContextBuilder {
     /// Create reasoning parser factory for gRPC mode
     fn with_reasoning_parser_factory(mut self) -> Self {
         // Initialize reasoning parser factory
-        self.reasoning_parser_factory = Some(ReasoningParserFactory::new());
+        self.reasoning_parser_factory = Some(crate::reasoning_dialect::parser_factory());
         self
     }
 
