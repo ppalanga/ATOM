@@ -18,6 +18,7 @@ pub const MINIMAX_M3: &str = "minimax_m3";
 const K3_THINK_START: &str = "<|open|>think<|sep|>";
 const K3_THINK_END: &str = "<|close|>think<|sep|>";
 const K3_RESPONSE_START: &str = "<|open|>response<|sep|>";
+const K3_RESPONSE_END: &str = "<|close|>response<|sep|>";
 const K3_TOOLS_START: &str = "<|open|>tools<|sep|>";
 const K3_REASONING_ENDS: [&str; 3] = [K3_THINK_END, K3_RESPONSE_START, K3_TOOLS_START];
 /// Paired wrappers around K3's answer. The bare `<|sep|>` and the unpaired
@@ -25,7 +26,7 @@ const K3_REASONING_ENDS: [&str; 3] = [K3_THINK_END, K3_RESPONSE_START, K3_TOOLS_
 /// reads after this stage (see `kimi_k3_tokens.UNPAIRED_FRAMING`).
 const K3_CONTENT_FRAMING: [&str; 5] = [
     K3_RESPONSE_START,
-    "<|close|>response<|sep|>",
+    K3_RESPONSE_END,
     "<|open|>message<|sep|>",
     "<|close|>message<|sep|>",
     "<|end_of_msg|>",
@@ -87,10 +88,23 @@ pub fn prompt_opened_reasoning(
 /// Kimi-K3's channel format. Reasoning ends at its own closer, or at the
 /// opening of the answer or tools channel, which K3 often writes in its place;
 /// those two stay in the text for the stages after this one.
+///
+/// K3 sometimes skips the channel instead: it writes its reply straight into
+/// the prompt-opened think channel and ends it with the answer's own closer,
+/// `<|close|>response<|sep|>`, with no think closer or response opener at all.
+/// If that closer was the channel's last words (whitespace and framing aside),
+/// the channel did not exit to the answer's own channel, and the model stopped
+/// rather than being cut off, the channel was the reply, and it goes out again
+/// as content. Mirrors `ReasoningFilter` in `atom/entrypoints/openai/reasoning.py`.
 #[derive(Default)]
 pub struct KimiK3Parser {
     in_reasoning: bool,
     buffer: String,
+    /// The channel's text so far, in case it turns out to have been the reply.
+    channel_text: String,
+    /// The channel's last words, whitespace and framing aside, were the
+    /// answer's closer.
+    answer_closed: bool,
 }
 
 impl KimiK3Parser {
@@ -99,14 +113,9 @@ impl KimiK3Parser {
         let (mut reasoning, mut normal) = (String::new(), String::new());
         loop {
             let markers: &[&str] = if self.in_reasoning {
-                &K3_REASONING_ENDS
+                &K3_CHANNEL_MARKERS
             } else {
                 &[K3_THINK_START]
-            };
-            let out = if self.in_reasoning {
-                &mut reasoning
-            } else {
-                &mut normal
             };
             let found = markers
                 .iter()
@@ -114,10 +123,29 @@ impl KimiK3Parser {
                 .min_by_key(|&(at, _)| at);
             let Some((at, marker)) = found else {
                 let keep = held_suffix(&self.buffer, self.in_reasoning);
-                out.extend(self.buffer.drain(..self.buffer.len() - keep));
+                let released: String = self.buffer.drain(..self.buffer.len() - keep).collect();
+                self.release(&released, &mut reasoning, &mut normal);
                 break;
             };
-            out.extend(self.buffer.drain(..at));
+            let released: String = self.buffer.drain(..at).collect();
+            self.release(&released, &mut reasoning, &mut normal);
+            if self.in_reasoning && !K3_REASONING_ENDS.contains(&marker) {
+                // Framing inside the channel is removed; the answer's closer
+                // is also remembered, for `close_channel` to decide on.
+                self.buffer.drain(..marker.len());
+                if marker == K3_RESPONSE_END {
+                    self.answer_closed = true;
+                }
+                continue;
+            }
+            if self.in_reasoning {
+                // After the think closer or the response opener the answer
+                // has its own channel, so this one was not the reply.
+                normal.push_str(&self.close_channel(marker == K3_TOOLS_START));
+            } else {
+                self.channel_text.clear();
+                self.answer_closed = false;
+            }
             if marker == K3_THINK_START || marker == K3_THINK_END {
                 self.buffer.drain(..marker.len());
             }
@@ -128,7 +156,73 @@ impl KimiK3Parser {
         }
         ParserResult::new(normal, reasoning)
     }
+
+    /// Text read past in the current state. Words after the answer's closer
+    /// mean it did not end the reply; whitespace does not.
+    fn release(&mut self, text: &str, reasoning: &mut String, normal: &mut String) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.in_reasoning {
+            normal.push_str(text);
+            return;
+        }
+        reasoning.push_str(text);
+        self.channel_text.push_str(text);
+        if self.answer_closed && !text.trim().is_empty() {
+            self.answer_closed = false;
+        }
+    }
+
+    /// The channel has ended; the text to send again as content if it was the
+    /// reply: the answer's closer ended it, and how it ended (`may_be_reply`) allows it.
+    fn close_channel(&mut self, may_be_reply: bool) -> String {
+        let kept = std::mem::take(&mut self.channel_text);
+        let closed = std::mem::replace(&mut self.answer_closed, false);
+        if closed && may_be_reply {
+            kept
+        } else {
+            String::new()
+        }
+    }
+
+    /// The end of the output, which `stopped` says the model chose rather
+    /// than being cut off: an output cut off at `max_tokens` right after a
+    /// quoted closer looks like a finished reply, and only the finish reason
+    /// tells the two apart. What is held never became a marker and goes out
+    /// as it is; it is not words, so it does not reopen `answer_closed`.
+    fn finish(&mut self, stopped: bool) -> ParserResult {
+        let rest = std::mem::take(&mut self.buffer);
+        if !self.in_reasoning {
+            return ParserResult::new(rest, String::new());
+        }
+        let reply = self.close_channel(stopped);
+        ParserResult::new(reply, rest)
+    }
+
+    /// A complete output, read in one feed and finished.
+    fn read_whole(&mut self, text: &str, stopped: bool) -> ParserResult {
+        self.reset();
+        let mut result = self.feed(text);
+        let end = self.finish(stopped);
+        result.normal_text.push_str(&end.normal_text);
+        result.reasoning_text.push_str(&end.reasoning_text);
+        self.reset();
+        result
+    }
 }
+
+/// What K3's reasoning channel watches for: its ends, and the framing removed
+/// from it, the answer's closer among them.
+const K3_CHANNEL_MARKERS: [&str; 7] = [
+    K3_THINK_END,
+    K3_RESPONSE_START,
+    K3_TOOLS_START,
+    K3_RESPONSE_END,
+    "<|open|>message<|sep|>",
+    "<|close|>message<|sep|>",
+    "<|end_of_msg|>",
+];
 
 /// How much of `buffer`'s tail could be the start of a marker still to come.
 /// Every marker begins with a `<|...|>` token, which a delta carries whole.
@@ -139,7 +233,7 @@ fn held_suffix(buffer: &str, in_reasoning: bool) -> usize {
     let tail = &buffer[at..];
     let is_partial = |m: &&str| m.len() > tail.len() && m.starts_with(tail);
     let partial = if in_reasoning {
-        K3_REASONING_ENDS.iter().any(is_partial)
+        K3_CHANNEL_MARKERS.iter().any(is_partial)
     } else {
         // The framing is held too, or a wrapper split over two deltas
         // would escape the strip.
@@ -156,17 +250,10 @@ fn held_suffix(buffer: &str, in_reasoning: bool) -> usize {
 }
 
 impl ReasoningParser for KimiK3Parser {
+    /// Without a finish reason the output is not known to have been stopped,
+    /// so a skipped channel stays reasoning; [`read_whole`] takes one.
     fn detect_and_parse_reasoning(&mut self, text: &str) -> Result<ParserResult, ParseError> {
-        self.reset();
-        let mut result = self.feed(text);
-        let rest = std::mem::take(&mut self.buffer);
-        if self.in_reasoning {
-            result.reasoning_text.push_str(&rest);
-        } else {
-            result.normal_text.push_str(&rest);
-        }
-        self.reset();
-        Ok(result)
+        Ok(self.read_whole(text, false))
     }
 
     fn parse_reasoning_streaming_incremental(
@@ -179,6 +266,8 @@ impl ReasoningParser for KimiK3Parser {
     fn reset(&mut self) {
         self.in_reasoning = false;
         self.buffer.clear();
+        self.channel_text.clear();
+        self.answer_closed = false;
     }
 
     fn model_type(&self) -> &str {
@@ -187,5 +276,52 @@ impl ReasoningParser for KimiK3Parser {
 
     fn is_in_reasoning(&self) -> bool {
         self.in_reasoning
+    }
+}
+
+/// A complete output split into reasoning and content by `parser`, the model
+/// having ended it itself when `stopped`. The crate's trait has no finish
+/// reason to pass, and Kimi-K3 is the one format that needs it.
+pub fn read_whole(
+    parser: &mut dyn ReasoningParser,
+    text: &str,
+    stopped: bool,
+) -> Result<ParserResult, ParseError> {
+    if parser.model_type() == KIMI_K3 {
+        Ok(KimiK3Parser::default().read_whole(text, stopped))
+    } else {
+        parser.detect_and_parse_reasoning(text)
+    }
+}
+
+/// One streamed response's reasoning parser, with the end-of-output step the
+/// crate's trait lacks: Kimi-K3's skipped channel is decided only there.
+pub enum StreamReasoning {
+    KimiK3(KimiK3Parser),
+    Crate(Box<dyn ReasoningParser>),
+}
+
+impl StreamReasoning {
+    pub fn new(parser: Box<dyn ReasoningParser>) -> Self {
+        if parser.model_type() == KIMI_K3 {
+            Self::KimiK3(KimiK3Parser::default())
+        } else {
+            Self::Crate(parser)
+        }
+    }
+
+    pub fn parser(&mut self) -> &mut dyn ReasoningParser {
+        match self {
+            Self::KimiK3(p) => p,
+            Self::Crate(p) => &mut **p,
+        }
+    }
+
+    /// The end of the output, which `stopped` says the model chose.
+    pub fn finish(&mut self, stopped: bool) -> ParserResult {
+        match self {
+            Self::KimiK3(p) => p.finish(stopped),
+            Self::Crate(_) => ParserResult::default(),
+        }
     }
 }

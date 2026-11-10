@@ -18,8 +18,8 @@ use crate::{
         chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
         common::{FunctionCallDelta, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage},
     },
-    reasoning_dialect::prompt_opened_reasoning,
-    reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser},
+    reasoning_dialect::{prompt_opened_reasoning, StreamReasoning},
+    reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult},
     routers::{
         prepare::{
             parser_factory_lookup::{check_reasoning_parser_availability, create_reasoning_parser},
@@ -141,7 +141,7 @@ async fn run_chat_stream(
 
     let mut stop_decoder = ctx.stop_decoder;
 
-    let mut reasoning_parser: Option<Arc<tokio::sync::Mutex<Box<dyn ReasoningParser>>>> = None;
+    let mut reasoning_parser: Option<StreamReasoning> = None;
     let mut tool_parser: Option<Arc<tokio::sync::Mutex<Box<dyn ToolParser>>>> = None;
     let mut sse_buffer = Vec::with_capacity(512);
 
@@ -186,8 +186,7 @@ async fn run_chat_stream(
                         model,
                         created,
                         system_fingerprint.as_deref(),
-                    )
-                    .await;
+                    );
                     if let Some(c) = reasoning_chunk {
                         format_sse_chunk_into(&mut sse_buffer, &c);
                         send_bytes(tx, &sse_buffer, "reasoning chunk")?;
@@ -259,6 +258,30 @@ async fn run_chat_stream(
                 meta,
                 ..
             } => {
+                // The reasoning parser's end, before the stop decoder's: what
+                // it holds is earlier text, and a Kimi-K3 reply written into
+                // the think channel is only recovered here.
+                if let Some(parser) = reasoning_parser.as_mut() {
+                    let end = parser.finish(finish_reason.ended_by_stop());
+                    if !end.reasoning_text.is_empty() {
+                        let chunk = ChatCompletionStreamResponse::builder(request_id, model)
+                            .created(created)
+                            .add_choice_reasoning(INDEX, end.reasoning_text)
+                            .maybe_system_fingerprint(system_fingerprint.clone())
+                            .build();
+                        format_sse_chunk_into(&mut sse_buffer, &chunk);
+                        send_bytes(tx, &sse_buffer, "held reasoning")?;
+                    }
+                    if !end.normal_text.is_empty() {
+                        let chunk = ChatCompletionStreamResponse::builder(request_id, model)
+                            .created(created)
+                            .add_choice_content(INDEX, "assistant", end.normal_text)
+                            .maybe_system_fingerprint(system_fingerprint.clone())
+                            .build();
+                        format_sse_chunk_into(&mut sse_buffer, &chunk);
+                        send_bytes(tx, &sse_buffer, "reasoning end content")?;
+                    }
+                }
                 if let SequenceDecoderOutput::Text(text) = stop_decoder.flush() {
                     if !text.is_empty() {
                         let chunk = ChatCompletionStreamResponse::builder(request_id, model)
@@ -395,9 +418,9 @@ fn process_chunk_tokens(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_reasoning_stream(
+fn process_reasoning_stream(
     delta: &str,
-    reasoning_parser: &mut Option<Arc<tokio::sync::Mutex<Box<dyn ReasoningParser>>>>,
+    reasoning_parser: &mut Option<StreamReasoning>,
     factory: Option<&ReasoningParserFactory>,
     configured: Option<&str>,
     prompt_text: Option<&str>,
@@ -412,26 +435,22 @@ async fn process_reasoning_stream(
             None => return (delta.to_string(), None, false),
         };
         match create_reasoning_parser(factory, configured, model) {
-            Some(mut p) => {
-                if let Some(opener) = prompt_opened_reasoning(&*p, prompt_text) {
-                    let _ = p.parse_reasoning_streaming_incremental(opener);
+            Some(p) => {
+                let mut p = StreamReasoning::new(p);
+                if let Some(opener) = prompt_opened_reasoning(p.parser(), prompt_text) {
+                    let _ = p.parser().parse_reasoning_streaming_incremental(opener);
                 }
-                *reasoning_parser = Some(Arc::new(tokio::sync::Mutex::new(p)));
+                *reasoning_parser = Some(p);
             }
             None => return (delta.to_string(), None, false),
         }
     }
 
-    let parser_arc = match reasoning_parser {
-        Some(p) => p.clone(),
-        None => return (delta.to_string(), None, false),
+    let Some(parser) = reasoning_parser.as_mut().map(StreamReasoning::parser) else {
+        return (delta.to_string(), None, false);
     };
-    let (parse_result, in_reasoning) = {
-        let mut parser = parser_arc.lock().await;
-        let result = parser.parse_reasoning_streaming_incremental(delta);
-        let in_reasoning = parser.is_in_reasoning();
-        (result, in_reasoning)
-    };
+    let parse_result = parser.parse_reasoning_streaming_incremental(delta);
+    let in_reasoning = parser.is_in_reasoning();
     match parse_result {
         Ok(ParserResult {
             reasoning_text,

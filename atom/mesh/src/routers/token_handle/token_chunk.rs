@@ -33,6 +33,20 @@ pub enum FinishReason {
     Other(String),
 }
 
+impl FinishReason {
+    /// Did the model end its output itself, rather than being cut off?
+    /// Mirrors `ended_by_stop` in `atom/entrypoints/openai/protocol.py`.
+    pub fn ended_by_stop(&self) -> bool {
+        match self {
+            Self::Stop => true,
+            Self::Other(r) => {
+                matches!(r.as_str(), "eos" | "stop" | "stop_sequence") || r.starts_with("stop_")
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum MatchedStop {
     Str(String),

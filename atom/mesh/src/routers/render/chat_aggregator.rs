@@ -13,7 +13,7 @@ use crate::{
         chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
         common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
     },
-    reasoning_dialect::prompt_opened_reasoning,
+    reasoning_dialect::{prompt_opened_reasoning, read_whole},
     reasoning_parser::ParserFactory as ReasoningParserFactory,
     routers::{
         comm::error,
@@ -235,7 +235,11 @@ async fn process_choice(
             if let Some(opener) = prompt_opened_reasoning(&**parser, prompt_text) {
                 processed_text.insert_str(0, opener);
             }
-            match parser.detect_and_parse_reasoning(&processed_text) {
+            match read_whole(
+                &mut **parser,
+                &processed_text,
+                finish_reason.ended_by_stop(),
+            ) {
                 Ok(result) => {
                     if !result.reasoning_text.is_empty() {
                         reasoning_text = Some(result.reasoning_text);
