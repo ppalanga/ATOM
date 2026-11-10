@@ -26,7 +26,7 @@ class PdAdmissionController:
     """Credits never free KV or decide whether a remote writer is safe."""
 
     @classmethod
-    def from_config(cls, config, connector):
+    def from_config(cls, config, connector, metrics):
         options = (getattr(config, "kv_transfer_config", None) or {}).get(
             "pd_admission", {}
         )
@@ -80,16 +80,18 @@ class PdAdmissionController:
             byte_limit = max(1, int(config.num_kvcache_blocks * block_bytes * fraction))
         if byte_limit is None:
             raise ValueError("pd_admission requires a receive-byte limit")
-        return cls(byte_limit, block_bytes)
+        return cls(byte_limit, block_bytes, metrics)
 
-    def __init__(self, max_bytes, block_bytes):
+    def __init__(self, max_bytes, block_bytes, metrics=None):
         self.max_bytes = max_bytes
         self.block_bytes = block_bytes
+        self.metrics = metrics
         self.pending: dict[str, PendingReceive] = {}
         self._block_refs: dict[int, int] = {}
         # Requests deferred at least once, per limit.
         self.deferred = {"bytes": 0}
         self.oversized_admissions = 0
+        self._publish()
         logger.info(
             "PD admission enabled: pending_kv_bytes=%d per D rank, "
             "block_bytes=%d; credits held until first forward",
@@ -112,34 +114,49 @@ class PdAdmissionController:
             return True
         reason = "bytes"
         # One deferral per request and limit, however many passes it waits.
-        if getattr(seq, "_pd_deferred_by", None) is None:
+        if getattr(seq, "_pd_deferred_at", None) is None:
+            seq._pd_deferred_at = time.perf_counter()
             seq._pd_deferred_by = set()
         if reason not in seq._pd_deferred_by:
             seq._pd_deferred_by.add(reason)
             self.deferred[reason] += 1
+            if self.metrics is not None:
+                self.metrics.pd_admission_deferred.labels(
+                    **self.metrics._labels, reason=reason
+                ).inc()
         return False
 
     def admit(self, seq, block_ids):
         key = str(seq.id)
         if key in self.pending:
             raise RuntimeError(f"Duplicate PD admission for sequence {key}")
-        seq._pd_deferred_by = None
+        deferred_at = getattr(seq, "_pd_deferred_at", None)
+        if self.metrics is not None:
+            self.metrics.pd_admission_credit_wait.observe(
+                0.0 if deferred_at is None else time.perf_counter() - deferred_at
+            )
+        seq._pd_deferred_at = None
         blocks = frozenset(block_ids)
         if len(blocks) * self.block_bytes > self.max_bytes:
             self.oversized_admissions += 1
+            if self.metrics is not None:
+                self.metrics.pd_admission_oversized.inc()
         self.pending[key] = PendingReceive(seq, blocks)
         for block in blocks:
             self._block_refs[block] = self._block_refs.get(block, 0) + 1
+        self._publish()
 
     def received(self, req_id):
         entry = self.pending.get(str(req_id))
         if entry is not None and entry.ready_at is None:
             entry.ready_at = time.perf_counter()
+            self._publish()
 
     def cancel(self, seq):
         entry = self.pending.get(str(seq.id))
         if entry is not None and entry.sequence is seq:
             entry.cancelled = True
+            self._publish()
 
     def scheduled(self, sequences):
         for seq in sequences:
@@ -148,6 +165,10 @@ class PdAdmissionController:
                 continue
             if entry.ready_at is None or entry.cancelled:
                 raise RuntimeError(f"Scheduled unfinished PD receive {seq.id}")
+            if self.metrics is not None:
+                self.metrics.pd_admission_ready_wait.observe(
+                    time.perf_counter() - entry.ready_at
+                )
             self.release(seq)
 
     def release(self, seq):
@@ -162,3 +183,21 @@ class PdAdmissionController:
                 self._block_refs[block] = refs
             else:
                 del self._block_refs[block]
+        self._publish()
+
+    def _publish(self):
+        if self.metrics is None:
+            return
+        counts = {"receiving": 0, "ready": 0, "cancel_draining": 0}
+        for entry in self.pending.values():
+            state = (
+                "cancel_draining"
+                if entry.cancelled
+                else ("ready" if entry.ready_at is not None else "receiving")
+            )
+            counts[state] += 1
+        for state, count in counts.items():
+            self.metrics.pd_admission_pending.labels(
+                **self.metrics._labels, state=state
+            ).set(count)
+        self.metrics.pd_admission_bytes.set(self.pending_bytes)

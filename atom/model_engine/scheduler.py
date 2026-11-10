@@ -890,7 +890,9 @@ class Scheduler:
         from atom.utils.forward_context import get_kvconnector
 
         self.kv_connector = get_kvconnector("scheduler", config)
-        self.pd_admission = PdAdmissionController.from_config(config, self.kv_connector)
+        self.pd_admission = PdAdmissionController.from_config(
+            config, self.kv_connector, self.metrics
+        )
         bind_block_manager = getattr(self.kv_connector, "bind_block_manager", None)
         if callable(bind_block_manager):
             bind_block_manager(self.block_manager)

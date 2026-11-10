@@ -529,3 +529,38 @@ def test_physical_targets_are_deduplicated_and_release_is_idempotent():
     assert policy.pending_bytes == 2048
     policy.release(b)
     assert policy.pending_bytes == 0
+
+
+def test_admission_metrics_follow_credit_lifecycle(monkeypatch):
+    from prometheus_client import CollectorRegistry
+
+    from atom.metrics.scheduler import SchedulerMetrics
+    from atom.model_engine import pd_admission
+
+    clock = [100.0]
+    monkeypatch.setattr(pd_admission.time, "perf_counter", lambda: clock[0])
+    registry = CollectorRegistry()
+    policy = PdAdmissionController(2048, 1024, SchedulerMetrics(registry=registry))
+    seq, other = SimpleNamespace(id=1), SimpleNamespace(id=2)
+    labels = {"dp_rank": "0", "engine_role": "default"}
+
+    def sample(name, **extra):
+        return registry.get_sample_value(f"atom:pd_admission_{name}", labels | extra)
+
+    policy.admit(seq, [1, 2])
+    assert sample("pending_requests", state="receiving") == 1
+    assert not policy.can_admit(other, 1)
+    clock[0] += 2
+    assert not policy.can_admit(other, 1)
+    assert sample("deferred_total", reason="bytes") == 1
+    policy.received(seq.id)
+    assert sample("pending_requests", state="ready") == 1
+    clock[0] += 3
+    policy.scheduled([seq])
+    assert sample("pending_kv_bytes") == 0
+    assert sample("ready_wait_seconds_count") == 1
+    assert policy.can_admit(other, 1)
+    policy.admit(other, [3])
+    # SEQ entered at once; OTHER waited from its first deferral at t=100.
+    assert sample("credit_wait_seconds_count") == 2
+    assert sample("credit_wait_seconds_sum") == 5
