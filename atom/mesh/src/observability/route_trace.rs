@@ -18,7 +18,8 @@ use crate::{
     policies::decision::RouteDecision,
 };
 
-/// Request header that logs the routing decisions of one request whatever the sample rate.
+/// Request header that logs the routing decisions of one request while the
+/// sample rate is above 0.
 pub const ROUTE_TRACE_HEADER: &str = "x-mesh-route-trace";
 
 static SAMPLE_RATE: OnceLock<f64> = OnceLock::new();
@@ -73,8 +74,9 @@ struct Selection {
     decision: RouteDecision,
 }
 
+/// Clients can send the header, so it only applies once the operator enables sampling.
 fn should_log(headers: &HeaderMap, rate: f64) -> bool {
-    headers.contains_key(ROUTE_TRACE_HEADER) || rand::rng().random::<f64>() < rate
+    rate > 0.0 && (headers.contains_key(ROUTE_TRACE_HEADER) || rand::rng().random::<f64>() < rate)
 }
 
 pub(crate) async fn scope(request: Request, next: Next) -> Response {
@@ -218,27 +220,21 @@ mod tests {
     }
 
     #[test]
-    fn header_forces_the_log_and_rate_samples_the_rest() {
+    fn header_forces_the_log_only_while_sampling() {
         let mut headers = HeaderMap::new();
         assert!(!should_log(&headers, 0.0));
         assert!(should_log(&headers, 1.0));
         headers.insert(ROUTE_TRACE_HEADER, "1".parse().unwrap());
-        assert!(should_log(&headers, 0.0));
+        assert!(!should_log(&headers, 0.0));
+        assert!(should_log(&headers, f64::MIN_POSITIVE));
     }
 
     #[tokio::test]
     async fn scope_installs_the_trace_for_the_handler() {
         let app = Router::new()
-            .route(
-                "/",
-                get(|| async { TRACE.with(|trace| trace.log.to_string()) }),
-            )
+            .route("/", get(|| async { current().is_some().to_string() }))
             .layer(axum::middleware::from_fn(scope));
-        let request = Request::builder()
-            .uri("/")
-            .header(ROUTE_TRACE_HEADER, "1")
-            .body(Body::empty())
-            .unwrap();
+        let request = Request::builder().uri("/").body(Body::empty()).unwrap();
 
         let response = app.oneshot(request).await.unwrap();
         let body = axum::body::to_bytes(response.into_body(), 64)

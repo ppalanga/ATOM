@@ -104,6 +104,15 @@ pub fn filter_decode_args_from(raw_args: &[String]) -> Vec<String> {
     filtered_args
 }
 
+fn parse_fraction(value: &str) -> Result<f64, String> {
+    let fraction: f64 = value.parse().map_err(|err| format!("{err}"))?;
+    if (0.0..=1.0).contains(&fraction) {
+        Ok(fraction)
+    } else {
+        Err(format!("{fraction} is not between 0 and 1"))
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Backend {
     #[value(name = "sglang")]
@@ -310,9 +319,9 @@ pub struct CliArgs {
     pub json_log: bool,
 
     /// Fraction of inference requests (0 to 1) that log their routing decisions
-    /// at info level under target mesh::route; the x-mesh-route-trace request
-    /// header logs a single request regardless
-    #[arg(long, default_value_t = 0.0, help_heading = "Logging")]
+    /// at info level under target mesh::route; above 0, the x-mesh-route-trace
+    /// request header logs a single request regardless. HTTP routers only
+    #[arg(long, default_value_t = 0.0, value_parser = parse_fraction, help_heading = "Logging")]
     pub route_log_sample_rate: f64,
 
     // ==================== Prometheus Metrics ====================
@@ -728,6 +737,18 @@ impl CliArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_log_sample_rate_must_be_a_fraction() {
+        let parse = |rate: &str| {
+            CliArgs::try_parse_from(["atomesh", &format!("--route-log-sample-rate={rate}")])
+                .map(|args| args.route_log_sample_rate)
+        };
+        assert_eq!(parse("0.25").unwrap(), 0.25);
+        for rate in ["-1", "2", "NaN"] {
+            assert!(parse(rate).is_err(), "{rate} was accepted");
+        }
+    }
 
     #[test]
     fn cli_prepare_options_map_to_router_config() {
