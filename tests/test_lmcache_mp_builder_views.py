@@ -69,6 +69,7 @@ def _builder_bases():
 
     return _module(
         "atom.model_ops.attentions.backends",
+        PERSISTENT_WORK_BUFFERS=(),
         AttentionBackend=AttentionBackend,
         CommonAttentionBuilder=CommonAttentionBuilder,
     )
@@ -196,7 +197,6 @@ def mla_builder_cls():
             ConcatGroup=noop,
             ConcatKeys=noop,
             DcpConcatGather=noop,
-            ubatch_concat_keys=noop,
             RowSplit=noop,
             Fp4LaunchStorages=noop,
             IndexRows=object,
@@ -211,6 +211,9 @@ def mla_builder_cls():
             "atom.model_ops.attentions.sparse_mla_head_groups",
             HEADS=128,
             SparsePrefillHeadGroups=noop,
+        ),
+        "atom.model_ops.attentions.selection_pack": _module(
+            "atom.model_ops.attentions.selection_pack", pack_row_selections=noop
         ),
         "atom.model_ops.attentions.backends": _builder_bases(),
         "atom.model_ops.attentions.pool_layout.sub_pool_spec": _sub_pool_module(),

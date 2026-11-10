@@ -22,7 +22,6 @@ _EXPORTS = {
     "ConcatKeys": ".rows",
     "DcpConcatGather": ".rows",
     "concat_groups": ".rows",
-    "ubatch_concat_keys": ".rows",
     "Fp4LaunchStorages": ".rows",
     "IndexCache": ".rows",
     "IndexRows": ".rows",
@@ -57,7 +56,6 @@ __all__ = [
     "quantize_query",
     "quantize_query_rows",
     "score_topk",
-    "ubatch_concat_keys",
 ]
 
 

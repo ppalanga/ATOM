@@ -204,26 +204,6 @@ def test_a_dcp_group_gathers_its_requests_off_the_step_tables(monkeypatch):
     assert values.shape == (10, 4) and scales.shape == (10, 1)
 
 
-def test_a_ubatch_keeps_the_groups_its_rows_fall_in():
-    """A TBO ubatch reads its rows' starts and the groups its rows fall in,
-    their rows rebased to the ubatch and their keys whole."""
-    groups = _concat_groups_of(
-        np.array([0, 300, 310, 610]), np.array([0, 4, 5, 9]), [(0, 1), (1, 3)]
-    )
-    keys = rows_module.ConcatKeys(None, None, 610, torch.arange(9), groups=groups)
-    ubatch = rows_module.ubatch_concat_keys(keys, 2, 6)
-    assert ubatch.row_starts.tolist() == [2, 3, 4, 5]
-    assert [(g.first, g.row_first, g.row_end, g.total) for g in ubatch.groups] == [
-        (0, 0, 2, 300),
-        (1, 2, 4, 310),
-    ]
-    ubatch = rows_module.ubatch_concat_keys(keys, 5, 9)
-    assert [(g.first, g.row_first, g.row_end) for g in ubatch.groups] == [(1, 0, 4)]
-    assert (
-        rows_module.ubatch_concat_keys(keys._replace(groups=None), 2, 6).groups is None
-    )
-
-
 @pytest.mark.parametrize("world", [2, 4, 8])
 @pytest.mark.parametrize("count", [1, 7, 12, 4097])
 def test_row_split_bands_only_this_rank_s_rows(world, count):
