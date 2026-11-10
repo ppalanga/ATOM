@@ -175,6 +175,83 @@ def test_fraction_uses_physical_pool_bytes(build, fraction):
     sched, _ = build(options=options)
     # 64 blocks of 1024 bytes; the default fraction is 0.15.
     assert sched.pd_admission.max_bytes == int(64 * 1024 * (fraction or 0.15))
+    assert sched.pd_admission.reserve_blocks is None
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_free_kv_watermark_keeps_room_for_running_requests(build, chunked):
+    sched, request = build(
+        chunked=chunked,
+        num_kvcache_blocks=10,
+        options={
+            "enabled": True,
+            "max_pending_kv_fraction": None,
+            "min_free_kv_fraction": 0.5,
+        },
+    )
+    assert sched.pd_admission.reserve_blocks == 5
+    a, b, c = request(), request(), request()
+    sched.extend([a, b, c])
+    batch, _ = sched.schedule()
+    # After B, 6 blocks stay free; C would leave 4, below the 5 reserved.
+    assert set(batch.connector_meta_output.reqs_to_recv) == {a.id, b.id}
+    assert not c.block_table
+    sched.schedule()
+    assert not c.block_table
+    assert (
+        admission_total(sched.metrics, "pd_admission_deferred", reason="free_kv") == 1
+    )
+    assert admission_total(sched.metrics, "pd_admission_deferred", reason="bytes") == 0
+    sched._update_from_kv_xfer_finished(receive_success(a))
+    sched._update_from_kv_xfer_finished(receive_success(b))
+    batch, _ = sched.schedule()
+    assert {a.id, b.id} <= set(batch.req_ids)
+    assert not c.block_table  # A and B held credits during this pass.
+    sched.schedule()
+    # Alone, C may enter below the watermark; the allocator still has room.
+    assert c.status == SequenceStatus.WAITING_FOR_REMOTE_KVS
+    assert set(sched.pd_admission.pending) == {str(c.id)}
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_free_kv_watermark_counts_claimed_prefix_hits(build, seq_factory, chunked):
+    sched, request = build(
+        chunked=chunked,
+        prefix=True,
+        num_kvcache_blocks=10,
+        options={
+            "enabled": True,
+            "max_pending_kv_fraction": None,
+            "min_free_kv_fraction": 0.6,
+        },
+    )
+    bm = sched.block_manager
+    seed = seq_factory(list(range(16)))
+    bm.allocate(seed, bm.can_allocate(seed))
+    bm.hash_blocks(seed, seed.num_tokens)
+    bm.deallocate(seed)
+    a, b = request(), request(16)
+    sched.add(a)
+    sched.schedule()
+    assert set(sched.pd_admission.pending) == {str(a.id)}
+    free = bm.kv.num_free
+    assert free == 8
+    sched.add(b)
+    sched.schedule()
+    # B receives one block, but its hit also takes two cached-but-free blocks:
+    # 8 - 3 would leave fewer than the 6 reserved.
+    assert not b.block_table
+    assert bm.kv.num_free == free
+    assert (
+        admission_total(sched.metrics, "pd_admission_deferred", reason="free_kv") == 1
+    )
+    assert admission_total(sched.metrics, "pd_admission_deferred", reason="bytes") == 0
+    sched._update_from_kv_xfer_finished(receive_success(a))
+    sched.schedule()
+    batch, _ = sched.schedule()
+    # Alone, B enters with the same three-block hit.
+    assert batch.connector_meta_output.reqs_to_recv[b.id].num_computed_blocks == 3
+    assert set(sched.pd_admission.pending) == {str(b.id)}
 
 
 @pytest.mark.parametrize("geometry_matches", [False, True])
@@ -508,6 +585,10 @@ def test_multiconnector_uses_load_winner(build):
         {"enabled": True, "max_pending_kv_fraction": 0.1, "max_pending_kv_bytes": 10},
         {"enabled": True, "max_pending_kv_fraction": None},
         {"enabled": True, "extra_growth_blocks_per_request": 1},
+        {"enabled": True, "min_free_kv_fraction": 0},
+        {"enabled": True, "min_free_kv_fraction": 1},
+        {"enabled": True, "min_free_kv_fraction": True},
+        {"enabled": True, "min_free_kv_fraction": float("inf")},
     ],
 )
 def test_invalid_config_rejected(build, options):
@@ -565,9 +646,9 @@ def test_admission_metrics_follow_credit_lifecycle(monkeypatch):
 
     policy.admit(seq, [1, 2])
     assert sample("pending_requests", state="receiving") == 1
-    assert not policy.can_admit(other, 1)
+    assert not policy.can_admit(other, 1, 64, 1)
     clock[0] += 2
-    assert not policy.can_admit(other, 1)
+    assert not policy.can_admit(other, 1, 64, 1)
     assert sample("deferred_total", reason="bytes") == 1
     policy.received(seq.id)
     assert sample("pending_requests", state="ready") == 1
@@ -575,7 +656,7 @@ def test_admission_metrics_follow_credit_lifecycle(monkeypatch):
     policy.scheduled([seq])
     assert sample("pending_kv_bytes") == 0
     assert sample("ready_wait_seconds_count") == 1
-    assert policy.can_admit(other, 1)
+    assert policy.can_admit(other, 1, 64, 1)
     policy.admit(other, [3])
     # SEQ entered at once; OTHER waited from its first deferral at t=100.
     assert sample("credit_wait_seconds_count") == 2
@@ -583,7 +664,7 @@ def test_admission_metrics_follow_credit_lifecycle(monkeypatch):
     policy.release(other)
     # Nothing pending, so one request may pass the byte budget.
     huge = SimpleNamespace(id=3)
-    assert policy.can_admit(huge, 3)
+    assert policy.can_admit(huge, 3, 64, 3)
     policy.admit(huge, [4, 5, 6])
     assert sample("oversized_total") == 1
     assert sample("pending_requests", state="receiving") == 1

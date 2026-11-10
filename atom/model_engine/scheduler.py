@@ -2520,7 +2520,10 @@ class Scheduler:
                     seq, num_blocks, num_cached_blocks
                 )
                 if pd_offset is not None and not self.pd_admission.can_admit(
-                    seq, num_blocks - pd_offset
+                    seq,
+                    num_blocks - pd_offset,
+                    self.block_manager.kv.num_free,
+                    num_blocks,
                 ):
                     self.waiting.appendleft(seq)
                     break
