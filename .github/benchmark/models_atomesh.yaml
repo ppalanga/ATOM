@@ -2782,6 +2782,8 @@ models:
           common_args:
             max_num_seqs: 400
             decode_max_num_seqs: 136
+      # At 0.94 a decode GPU keeps 14.8 GiB free at the serving peak; 0.96
+      # would leave about 9 GiB.
       - <<: *m31_agentx_1p2d
         name: m31-agentx-1p2d-c220
         concurrency:
@@ -2789,6 +2791,7 @@ models:
         decode:
           <<: *m31_agentx_1p2d_decode
           cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,144,152]'
+          extra_args: --gpu-memory-utilization 0.94
         server:
           common_args:
             max_num_seqs: 440
@@ -2800,6 +2803,7 @@ models:
         decode:
           <<: *m31_agentx_1p2d_decode
           cudagraph: '[1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,144,160]'
+          extra_args: --gpu-memory-utilization 0.94
         server:
           common_args:
             max_num_seqs: 480
