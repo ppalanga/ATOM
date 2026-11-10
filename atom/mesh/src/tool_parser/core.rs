@@ -123,6 +123,14 @@ pub trait ToolParser: Send + Sync {
     /// Check if text contains tool calls in this parser's format
     fn has_tool_markers(&self, text: &str) -> bool;
 
+    /// Does this format wrap every answer in channel framing that this parser
+    /// removes, tool call or not? Such a parser runs on a request without
+    /// tools too; one whose markers only open tool-call regions does not, so
+    /// a literal discussion of its syntax stays text.
+    fn consumes_channel_framing(&self) -> bool {
+        false
+    }
+
     /// Optionally expose a token-aware parser implementation.
     /// Default returns `None`, meaning the parser only supports text input.
     fn as_token_parser(&self) -> Option<&dyn TokenToolParser> {

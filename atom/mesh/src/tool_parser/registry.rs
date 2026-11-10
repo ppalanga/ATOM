@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use openai_protocol::common::Tool;
 use tokio::sync::Mutex;
 
 use super::{
@@ -332,6 +333,21 @@ pub(crate) fn check_tool_parser_availability(
     } else {
         factory.registry().has_parser_for_model(model)
     }
+}
+
+/// Whether this request's output goes through the tool parser. Without tools
+/// (omitted or `[]`) only a parser that also removes the model's channel
+/// framing runs, so a literal discussion of tool-call syntax stays text.
+pub(crate) fn tool_parser_runs(
+    factory: &ParserFactory,
+    configured_parser: Option<&str>,
+    model: &str,
+    tools: Option<&[Tool]>,
+) -> bool {
+    check_tool_parser_availability(factory, configured_parser, model)
+        && (tools.is_some_and(|t| !t.is_empty())
+            || create_tool_parser(factory, configured_parser, model)
+                .is_some_and(|p| p.consumes_channel_framing()))
 }
 
 /// Returns a pooled parser for a non-streaming response.

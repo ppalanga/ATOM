@@ -773,6 +773,11 @@ mod k3 {
             self.tools_open_re.is_match(text)
         }
 
+        /// The `response` channel and message close wrap every K3 answer.
+        fn consumes_channel_framing(&self) -> bool {
+            true
+        }
+
         fn reset(&mut self) {
             self.buffer.clear();
             self.sent_content_idx = 0;

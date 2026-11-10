@@ -35,7 +35,7 @@ use crate::{
         traits::Tokenizer,
     },
     tool_parser::{
-        registry::{check_tool_parser_availability, get_tool_parser},
+        registry::{get_tool_parser, tool_parser_runs},
         ParserFactory as ToolParserFactory,
     },
 };
@@ -98,18 +98,18 @@ async fn aggregate(
 
     // Read with `tool_choice: "none"` too, so the markup leaves the content;
     // `process_choice` then drops the calls.
-    let tool_available = chat_request.tools.is_some()
-        && ctx
-            .tool_parser_factory
-            .as_ref()
-            .map(|f| {
-                check_tool_parser_availability(
-                    f,
-                    ctx.configured_tool_parser.as_deref(),
-                    &chat_request.model,
-                )
-            })
-            .unwrap_or(false);
+    let tool_available = ctx
+        .tool_parser_factory
+        .as_ref()
+        .map(|f| {
+            tool_parser_runs(
+                f,
+                ctx.configured_tool_parser.as_deref(),
+                &chat_request.model,
+                chat_request.tools.as_deref(),
+            )
+        })
+        .unwrap_or(false);
 
     let mut stop_decoder = ctx.stop_decoder;
     let mut choices = Vec::with_capacity(completes.len());
@@ -257,7 +257,7 @@ async fn process_choice(
         Some(ToolChoice::Value(ToolChoiceValue::None))
     );
 
-    if chat_request.tools.is_some() {
+    if chat_request.tools.is_some() || tool_available {
         let used_json_schema = match &chat_request.tool_choice {
             Some(ToolChoice::Function { .. }) => true,
             Some(ToolChoice::Value(ToolChoiceValue::Required)) => true,

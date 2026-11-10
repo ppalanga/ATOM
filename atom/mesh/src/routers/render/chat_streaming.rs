@@ -35,7 +35,7 @@ use crate::{
     },
     tokenizer::stop::{SequenceDecoderOutput, StopSequenceDecoder},
     tool_parser::{
-        registry::{check_tool_parser_availability, create_tool_parser},
+        registry::{create_tool_parser, tool_parser_runs},
         ParserFactory as ToolParserFactory, StreamingParseResult, ToolParser,
     },
 };
@@ -114,14 +114,18 @@ async fn run_chat_stream(
     let tool_choice_enabled =
         !matches!(tool_choice, Some(ToolChoice::Value(ToolChoiceValue::None)));
 
-    let tool_parser_available = tools.is_some()
-        && ctx
-            .tool_parser_factory
-            .as_ref()
-            .map(|f| {
-                check_tool_parser_availability(f, ctx.configured_tool_parser.as_deref(), model)
-            })
-            .unwrap_or(false);
+    let tool_parser_available = ctx
+        .tool_parser_factory
+        .as_ref()
+        .map(|f| {
+            tool_parser_runs(
+                f,
+                ctx.configured_tool_parser.as_deref(),
+                model,
+                tools.as_deref(),
+            )
+        })
+        .unwrap_or(false);
 
     if separate_reasoning && !reasoning_parser_available {
         debug!("No reasoning parser found for model '{}'", model);
@@ -198,7 +202,6 @@ async fn run_chat_stream(
                 };
 
                 if !in_reasoning
-                    && tools.is_some()
                     && (tool_parser_available || (used_json_schema && tool_choice_enabled))
                 {
                     let tool_chunks = if is_specific_function {
@@ -217,7 +220,7 @@ async fn run_chat_stream(
                             &delta,
                             &mut tool_parser,
                             &mut has_tool_call,
-                            tools.as_ref().unwrap(),
+                            tools.as_deref().unwrap_or_default(),
                             ctx.tool_parser_factory.as_ref(),
                             ctx.configured_tool_parser.as_deref(),
                             request_id,
