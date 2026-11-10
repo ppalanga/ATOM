@@ -2750,9 +2750,6 @@ models:
           wait_router_timeout: 600
         run_eval: false
         runner:
-          # These deny the privileged host cache drop or had GPUs held by
-          # other jobs on pit2-p03.
-          exclude_nodes: pit2-p03-g03,pit2-p03-g07,pit2-p03-g08,pit2-p03-g10,pit2-p03-g12,pit2-p03-g15,pit2-p03-g23,pit2-p03-g25,pit2-p03-g27,pit2-p03-g37,pit2-p03-g40
           time_limit: 04:00:00
         router:
           policy: cache_aware
