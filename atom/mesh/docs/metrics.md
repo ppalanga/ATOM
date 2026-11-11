@@ -31,7 +31,8 @@ curl -s http://<router-host>:<router-port>/metrics \
 Values accumulate from router start. Use `rate()` or `increase()` in
 Prometheus, or subtract a scrape taken before a benchmark from one taken after
 it. A series appears once it has a sample, so a policy or branch that never ran
-has no line.
+has no line. `--route-log-sample-rate` logs individual decisions with the same
+fields (see [Logging](../README.md#logging)).
 
 Agentic PD CI runs every concurrency level against one router and saves three
 files per level under `metrics/` in the run artifact:
@@ -252,7 +253,9 @@ differences, for example hit rate = increase of `hit` / increase of all results.
 
 An excerpt of `/metrics` from a local run: 2 prefill and 2 decode mock
 workers, `--prefill-policy cache_aware --decode-policy dp_sticky`, 3 sessions
-of 4 chat turns with a growing prompt.
+of 4 chat turns with a growing prompt. The mock workers report 100 prompt
+tokens, 60 of them cached, for every request, so the error values only
+illustrate the format.
 
 ```text
 mesh_route_branch_total{pool="prefill",policy="cache_aware",branch="relocate"} 3
@@ -269,6 +272,15 @@ mesh_route_prefix_match_ratio_count{pool="prefill",policy="cache_aware"} 12
 mesh_route_selected_worker_active_requests_sum{pool="prefill",policy="cache_aware",branch="affinity"} 0
 mesh_route_selected_worker_active_requests_count{pool="prefill",policy="cache_aware",branch="affinity"} 9
 mesh_route_selected_worker_active_requests_count{pool="prefill",policy="cache_aware",branch="relocate"} 3
+mesh_route_cache_tokens_total{pool="prefill",kind="prompt"} 1200
+mesh_route_cache_tokens_total{pool="prefill",kind="cached"} 720
+mesh_route_cache_estimate_tokens_total{pool="prefill",kind="prompt"} 1100
+mesh_route_cache_estimate_tokens_total{pool="prefill",kind="estimated"} 710
+mesh_route_cache_estimate_tokens_total{pool="prefill",kind="actual"} 660
+mesh_route_cache_estimate_error_ratio_sum{pool="prefill"} 0.5
+mesh_route_cache_estimate_error_ratio_count{pool="prefill"} 11
+mesh_selected_dp_rank_total{pool="prefill",worker="http://127.0.0.1:30069",dp_rank="none"} 8
+mesh_selected_dp_rank_total{pool="prefill",worker="http://127.0.0.1:30070",dp_rank="none"} 4
 ```
 
 Reading it:
@@ -282,6 +294,10 @@ Reading it:
 - The `dp_sticky` hit rate is 9 / 12 = 75%: each session's first turn is `new`.
   No session changed workers, so `mesh_session_worker_change_total` has no
   line.
+- The engines reported 720 / 1200 = 60% of prompt tokens cached. 11 decisions
+  carried an estimate: the 9 `affinity` decisions and the 2 relocations that
+  happened to pick the best-match worker. The router estimated 710 tokens
+  where the engines reported 660, a bias of +50 / 1100 = +4.5%.
 
 [#3141]: https://github.com/ROCm/ATOM/pull/3141
 [#3142]: https://github.com/ROCm/ATOM/pull/3142
