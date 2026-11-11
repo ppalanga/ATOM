@@ -403,7 +403,6 @@ export LMCACHE_CHUNK_SIZE=256
 
 export MORI_SHMEM_HEAP_SIZE=16G
 export ATOM_MEGA_DECODE_MTPR=512
-export AITER_MEGA_FIXED_SLOT_MAX_MTPR=1023
 export ATOM_EPLB_MAX_REBALANCES=4
 
 python3 -u -m atom.entrypoints.openai_server \
