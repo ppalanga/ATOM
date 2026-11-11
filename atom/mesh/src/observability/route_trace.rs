@@ -71,6 +71,8 @@ struct Selection {
     pool: &'static str,
     policy: &'static str,
     worker: Arc<dyn Worker>,
+    /// Router-tracked active requests on `worker` when the policy selected it.
+    active_requests: usize,
     decision: RouteDecision,
 }
 
@@ -108,6 +110,7 @@ pub(crate) fn record_selection(
             pool,
             policy,
             worker: worker.clone(),
+            active_requests: worker.load(),
             decision,
         });
     });
@@ -146,7 +149,7 @@ pub(crate) fn record_dispatch(pool: &'static str, worker: &Arc<dyn Worker>) {
                 .filter(|_| remapped)
                 .map(|selection| selection.worker.url()),
             match_ratio = decision.and_then(|decision| decision.match_ratio),
-            cost = decision.and_then(|decision| decision.cost),
+            active_requests = selection.map(|selection| selection.active_requests),
             affinity = decision.and_then(|decision| decision.affinity),
             "Selected worker"
         );
