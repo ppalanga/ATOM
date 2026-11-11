@@ -1385,7 +1385,7 @@ def test_opposite_admission_order_progresses_without_recompute(
     p.kv_connector = scheduler_connector(monkeypatch, True)
     d.kv_connector = scheduler_connector(monkeypatch, False)
     if byte_limit:
-        d.pd_admission = PdAdmissionController(12, 4)
+        d.pd_admission = PdAdmissionController(12, 4, d.metrics)
     pa, pb = [pd_sequence(seq_factory, name) for name in ("xfer-a", "xfer-b")]
     da, db = [pd_sequence(seq_factory, name, False) for name in ("xfer-a", "xfer-b")]
     p.extend([pa, pb])
@@ -1437,7 +1437,13 @@ def test_opposite_admission_order_progresses_without_recompute(
             assert d.pd_admission.pending_bytes == 12
             if ds is db:
                 assert not da.block_table
-                assert d.pd_admission.deferred["bytes"] == 1
+                want = {**d.metrics._labels, "reason": "bytes"}
+                assert any(
+                    sample.labels == want and sample.value == 1
+                    for family in d.metrics.pd_admission_deferred.collect()
+                    for sample in family.samples
+                    if sample.name.endswith("_total")
+                )
         dw.start_load_kv(batch.connector_meta_output)
         # Reserving D's pages alone cannot admit P: the write request still
         # waits in D's queue until prior GPU writes to those pages finish.

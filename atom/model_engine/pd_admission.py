@@ -88,9 +88,6 @@ class PdAdmissionController:
         self.metrics = metrics
         self.pending: dict[str, PendingReceive] = {}
         self._block_refs: dict[int, int] = {}
-        # Requests deferred at least once, per limit.
-        self.deferred = {"bytes": 0}
-        self.oversized_admissions = 0
         self._publish()
         logger.info(
             "PD admission enabled: pending_kv_bytes=%d per D rank, "
@@ -119,7 +116,6 @@ class PdAdmissionController:
             seq._pd_deferred_by = set()
         if reason not in seq._pd_deferred_by:
             seq._pd_deferred_by.add(reason)
-            self.deferred[reason] += 1
             if self.metrics is not None:
                 self.metrics.pd_admission_deferred.labels(
                     **self.metrics._labels, reason=reason
@@ -137,10 +133,8 @@ class PdAdmissionController:
             )
         seq._pd_deferred_at = None
         blocks = frozenset(block_ids)
-        if len(blocks) * self.block_bytes > self.max_bytes:
-            self.oversized_admissions += 1
-            if self.metrics is not None:
-                self.metrics.pd_admission_oversized.inc()
+        if len(blocks) * self.block_bytes > self.max_bytes and self.metrics is not None:
+            self.metrics.pd_admission_oversized.inc()
         self.pending[key] = PendingReceive(seq, blocks)
         for block in blocks:
             self._block_refs[block] = self._block_refs.get(block, 0) + 1
